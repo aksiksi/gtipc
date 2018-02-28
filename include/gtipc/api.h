@@ -5,7 +5,8 @@
 #include "gtipc/messages.h"
 
 /* API error codes */
-static int GTIPC_MODE_ERROR = 1; // Invalid mode provided at init time
+static int GTIPC_INIT_ERROR = 1;
+static int GTIPC_FATAL_ERROR = 2;
 
 /* API initialization and exit */
 extern int gtipc_init(gtipc_mode mode);
