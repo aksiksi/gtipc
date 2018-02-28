@@ -38,11 +38,11 @@ $(SERVER): $(OBJDIR)/gtipc_server.o | $(BINDIR)
 $(OBJDIR)/client.o: $(API) sample/client.c | $(OBJDIR)
 	$(CC) $(CCFLAGS) $(INCLUDES) sample/client.c -o $@
 
-$(OBJDIR)/gtipc_api.o: $(SRCDIR)/api/gtipc_api.c $(INCDIR)/gtipc_api.h | $(OBJDIR)
-	$(CC) $(CCFLAGS) $(INCLUDES) $(SRCDIR)/api/gtipc_api.c -o $@ $(LIBS)
+$(OBJDIR)/gtipc_api.o: $(SRCDIR)/api/api.c $(INCDIR)/gtipc/api.h | $(OBJDIR)
+	$(CC) $(CCFLAGS) $(INCLUDES) $(SRCDIR)/api/api.c -o $@ $(LIBS)
 
-$(OBJDIR)/gtipc_server.o: $(SRCDIR)/server/gtipc_server.c $(SRCDIR)/server/gtipc_server.h | $(OBJDIR)
-	$(CC) $(CCFLAGS) $(SRCDIR)/server/gtipc_server.c -o $@
+$(OBJDIR)/gtipc_server.o: $(SRCDIR)/server/server.c $(SRCDIR)/server/server.h | $(OBJDIR)
+	$(CC) $(CCFLAGS) $(INCLUDES) $(SRCDIR)/server/server.c -o $@
 
 # If BINDIR or OBJDIR do not exist, create them
 $(BINDIR):

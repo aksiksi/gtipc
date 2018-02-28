@@ -1,6 +1,8 @@
 #include <stdio.h>
 #include <pthread.h>
 
+#include "server.h"
+
 void *test_add(void *arg) {
     int *x = (int *)arg;
     (*x)++;
