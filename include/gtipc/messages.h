@@ -7,7 +7,7 @@
 
 typedef struct __gtipc_registry {
     // Register or unregister current client
-    gtipc_registry_cmd reg;
+    gtipc_registry_cmd cmd;
 
     // Client's PID
     pid_t pid;

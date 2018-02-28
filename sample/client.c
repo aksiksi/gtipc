@@ -3,8 +3,6 @@
 #include "gtipc/api.h"
 
 int main() {
-    printf("Hello, world!\n");
-
     gtipc_arg arg;
     arg.x = 10;
     arg.y = 11;

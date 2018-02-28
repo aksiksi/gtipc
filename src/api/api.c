@@ -9,10 +9,10 @@
 #include <errno.h>
 
 #include "gtipc/api.h"
+#include "gtipc/messages.h"
 #include "gtipc/params.h"
 
 /* Global state */
-
 // Flags and modes
 static int MODE = GTIPC_SYNC; // Mode defaults to SYNC
 
@@ -21,36 +21,39 @@ mqd_t global_registry_queue;
 gtipc_registry registry_entry;
 
 // POSIX message queues and names
-mqd_t send_queue;
-mqd_t recv_queue;
-char send_queue_name[100];
-char recv_queue_name[100];
+struct __gtipc_mq {
+    mqd_t send_queue;
+    mqd_t recv_queue;
+    char send_queue_name[100];
+    char recv_queue_name[100];
+} gtipc_mq;
 
 /* Create all required message queues */
 int create_queues() {
     // Derive names for send and recv queues based on current PID
     pid_t pid = getpid();
-
-    char *queue_names[] = {send_queue_name, recv_queue_name};
+    char *queue_names[] = {gtipc_mq.send_queue_name, gtipc_mq.recv_queue_name};
     char *queue_prefixes[] = {GTIPC_SENDQ_PREFIX, GTIPC_RECVQ_PREFIX};
     int i, written;
 
+    // Perform string concat via sprintf (prefix + PID)
     for (i = 0; i < 2; i++) {
         written = 0;
         written += sprintf(queue_names[i], "%s", queue_prefixes[i]);
         sprintf(queue_names[i] + written, "%ld", (long)pid); // NOTE: sprintf sets null terminator
     }
 
-    // Finally, create the send and receive queues for current client
     // Set custom attributes (message size and queue capacity)
     struct mq_attr attr;
     attr.mq_maxmsg = 10; // NOTE: must be <=10 for *unprivileged* process (see: http://man7.org/linux/man-pages/man7/mq_overview.7.html)
-    attr.mq_msgsize = (1 << 13); // 8K byte messages
+    attr.mq_msgsize = (1 << 13); // 8K byte messages (8K is the DEFAULT)
 
-    send_queue = mq_open(send_queue_name, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR, &attr);
-    recv_queue = mq_open(recv_queue_name, O_CREAT | O_RDONLY, S_IRUSR | S_IWUSR, &attr);
+    // Finally, create the send and receive queues for current client
+    // Queues are exclusively created by current process
+    gtipc_mq.send_queue = mq_open(gtipc_mq.send_queue_name, O_EXCL | O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR, &attr);
+    gtipc_mq.recv_queue = mq_open(gtipc_mq.recv_queue_name, O_EXCL | O_CREAT | O_RDONLY, S_IRUSR | S_IWUSR, &attr);
 
-    if (send_queue == (mqd_t)-1 || recv_queue == (mqd_t)-1) {
+    if (gtipc_mq.send_queue == (mqd_t)-1 || gtipc_mq.recv_queue == (mqd_t)-1) {
         fprintf(stderr, "FATAL: mq_open() failed in create_queues()\n");
         return GTIPC_FATAL_ERROR;
     }
@@ -60,8 +63,8 @@ int create_queues() {
 
 void destroy_queues() {
     int i;
-    mqd_t queues[] = {send_queue, recv_queue};
-    char *queue_names[] = {send_queue_name, recv_queue_name};
+    mqd_t queues[] = {gtipc_mq.send_queue, gtipc_mq.recv_queue};
+    char *queue_names[] = {gtipc_mq.send_queue_name, gtipc_mq.recv_queue_name};
 
     for (i = 0; i < 2; i++) {
         // Close the queue
@@ -103,15 +106,19 @@ int gtipc_init(gtipc_mode mode) {
 
     // Prepare registry entry for send
     registry_entry.pid = getpid();
-    registry_entry.reg = GTIPC_CLIENT_REGISTER;
+    registry_entry.cmd = GTIPC_CLIENT_REGISTER;
 
     // Pass along queue names for easy lookups
     // Copy over names to registry entry
-    strncpy(registry_entry.send_queue_name, send_queue_name, 100);
-    strncpy(registry_entry.recv_queue_name, recv_queue_name, 100);
+    strncpy(registry_entry.send_queue_name, gtipc_mq.send_queue_name, 100);
+    strncpy(registry_entry.recv_queue_name, gtipc_mq.recv_queue_name, 100);
+
+    #if DEBUG
+    printf("send = %s, recv = %s\n", gtipc_mq.send_queue_name, gtipc_mq.recv_queue_name);
+    #endif
 
     // Send a register message to register this client with server
-    if (mq_send(send_queue, (const char *)&registry_entry, sizeof(gtipc_registry), 1)) {
+    if (mq_send(gtipc_mq.send_queue, (const char *)&registry_entry, sizeof(gtipc_registry), 1)) {
         fprintf(stderr, "FATAL: mq_send() failed in gtipc_init()\n");
         return GTIPC_FATAL_ERROR;
     }
@@ -126,8 +133,8 @@ int gtipc_exit() {
     }
 
     // Send an unregister message to the server
-    registry_entry.reg = GTIPC_CLIENT_UNREGISTER;
-    if (mq_send(send_queue, (const char *)&registry_entry, sizeof(gtipc_registry), 1)) {
+    registry_entry.cmd = GTIPC_CLIENT_UNREGISTER;
+    if (mq_send(gtipc_mq.send_queue, (const char *)&registry_entry, sizeof(gtipc_registry), 1)) {
         fprintf(stderr, "FATAL: Unregister message send failure in gtipc_exit()\n");
         return GTIPC_FATAL_ERROR;
     }

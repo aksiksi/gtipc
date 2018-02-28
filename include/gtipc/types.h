@@ -23,10 +23,12 @@ typedef enum __gtipc_service {
     GTIPC_MUL
 } gtipc_service;
 
-/* Client IPC registry commands */
+/* IPC registry commands */
 typedef enum __gtipc_registry_cmd {
     GTIPC_CLIENT_REGISTER,
-    GTIPC_CLIENT_UNREGISTER
+    GTIPC_CLIENT_UNREGISTER,
+    GTIPC_CLIENT_CLOSE,
+    GTIPC_SERVER_CLOSE
 } gtipc_registry_cmd;
 
 #endif //GTIPC_TYPES_H

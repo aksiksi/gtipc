@@ -2,7 +2,6 @@
 #define GTIPC_API_H
 
 #include "gtipc/types.h"
-#include "gtipc/messages.h"
 
 /* API error codes */
 static int GTIPC_INIT_ERROR = 1;
