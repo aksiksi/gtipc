@@ -17,4 +17,15 @@ typedef struct __gtipc_registry {
     char recv_queue_name[100];
 } gtipc_registry;
 
+typedef struct __gtipc_request {
+    gtipc_service service;
+    gtipc_arg arg;
+    int request_id;
+} gtipc_request;
+
+typedef struct __gtipc_response {
+    int request_id;
+    gtipc_arg arg;
+} gtipc_response;
+
 #endif

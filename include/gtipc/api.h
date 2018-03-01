@@ -6,6 +6,8 @@
 /* API error codes */
 static int GTIPC_INIT_ERROR = 1;
 static int GTIPC_FATAL_ERROR = 2;
+static int GTIPC_RECV_ERROR = 3;
+static int GTIPC_SEND_ERROR = 4;
 
 /* API initialization and exit */
 extern int gtipc_init(gtipc_mode mode);

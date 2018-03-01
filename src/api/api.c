@@ -17,8 +17,11 @@
 static int MODE = GTIPC_SYNC; // Mode defaults to SYNC
 
 // Global registry
-mqd_t global_registry_queue;
+mqd_t global_registry;
 gtipc_registry registry_entry;
+
+// Current request ID
+volatile int global_request_id = 0;
 
 // POSIX message queues and names
 struct __gtipc_mq {
@@ -46,11 +49,13 @@ int create_queues() {
     // Set custom attributes (message size and queue capacity)
     struct mq_attr attr;
     attr.mq_maxmsg = 10; // NOTE: must be <=10 for *unprivileged* process (see: http://man7.org/linux/man-pages/man7/mq_overview.7.html)
-    attr.mq_msgsize = (1 << 13); // 8K byte messages (8K is the DEFAULT)
 
     // Finally, create the send and receive queues for current client
     // Queues are exclusively created by current process
+    attr.mq_msgsize = sizeof(gtipc_request);
     gtipc_mq.send_queue = mq_open(gtipc_mq.send_queue_name, O_EXCL | O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR, &attr);
+
+    attr.mq_msgsize = sizeof(gtipc_response);
     gtipc_mq.recv_queue = mq_open(gtipc_mq.recv_queue_name, O_EXCL | O_CREAT | O_RDONLY, S_IRUSR | S_IWUSR, &attr);
 
     if (gtipc_mq.send_queue == (mqd_t)-1 || gtipc_mq.recv_queue == (mqd_t)-1) {
@@ -63,6 +68,7 @@ int create_queues() {
 
 void destroy_queues() {
     int i;
+
     mqd_t queues[] = {gtipc_mq.send_queue, gtipc_mq.recv_queue};
     char *queue_names[] = {gtipc_mq.send_queue_name, gtipc_mq.recv_queue_name};
 
@@ -73,12 +79,6 @@ void destroy_queues() {
         // Unlink the queue to help kernel with ref. counting
         mq_unlink(queue_names[i]);
     }
-}
-
-void *test_add(void *arg) {
-    gtipc_arg *out = (gtipc_arg *)arg;
-    out->res = out->x + out->y;
-    return NULL;
 }
 
 int gtipc_init(gtipc_mode mode) {
@@ -94,10 +94,10 @@ int gtipc_init(gtipc_mode mode) {
     }
 
     // Obtain write-only reference to global registry message queue
-    global_registry_queue = mq_open(GTIPC_REGISTRY_QUEUE, O_WRONLY);
+    global_registry = mq_open(GTIPC_REGISTRY_QUEUE, O_RDWR);
 
-    if (global_registry_queue == (mqd_t)-1) {
-        fprintf(stderr, "FATAL: mq_open(global_registry_queue) failed in gtipc_init()\n");
+    if (global_registry == (mqd_t)-1) {
+        fprintf(stderr, "FATAL: mq_open(global_registry) failed in gtipc_init()\n");
         return GTIPC_FATAL_ERROR;
     }
 
@@ -118,10 +118,13 @@ int gtipc_init(gtipc_mode mode) {
     #endif
 
     // Send a register message to register this client with server
-    if (mq_send(gtipc_mq.send_queue, (const char *)&registry_entry, sizeof(gtipc_registry), 1)) {
-        fprintf(stderr, "FATAL: mq_send() failed in gtipc_init()\n");
+    if (mq_send(global_registry, (const char *)&registry_entry, sizeof(gtipc_registry), 1)) {
+        fprintf(stderr, "FATAL: mq_send(global_registry) failed in gtipc_init()\n");
         return GTIPC_FATAL_ERROR;
     }
+
+    // Reset request ID
+    global_request_id = 0;
 
     return 0;
 }
@@ -134,7 +137,7 @@ int gtipc_exit() {
 
     // Send an unregister message to the server
     registry_entry.cmd = GTIPC_CLIENT_UNREGISTER;
-    if (mq_send(gtipc_mq.send_queue, (const char *)&registry_entry, sizeof(gtipc_registry), 1)) {
+    if (mq_send(global_registry, (const char *)&registry_entry, sizeof(gtipc_registry), 1)) {
         fprintf(stderr, "FATAL: Unregister message send failure in gtipc_exit()\n");
         return GTIPC_FATAL_ERROR;
     }
@@ -145,24 +148,92 @@ int gtipc_exit() {
     return 0;
 }
 
+/**
+ * Send IPC request to server and return ID.
+ * @return 0 if no error, or GTIPC_SEND_ERROR
+ */
+int send_request(gtipc_arg *arg, gtipc_service service, int *request_id) {
+    // Create an IPC request object
+    gtipc_request req;
+    req.service = service;
+    req.arg = *arg;
+    req.request_id = global_request_id++;
+
+    // Send request to server
+    if (mq_send(gtipc_mq.send_queue, (char *)&req, sizeof(gtipc_request), 1)) {
+        fprintf(stderr, "ERROR: Failed to send request to server\n");
+        return GTIPC_SEND_ERROR;
+    }
+
+    *request_id = req.request_id;
+
+    return 0;
+}
+
+/**
+ * Wait for response from IPC server.
+ * @param arg
+ * @return
+ */
+int recv_response(int request_id, gtipc_arg *arg) {
+    char buf[sizeof(gtipc_response)];
+    gtipc_response *resp = NULL;
+
+    // Wait for reply on recv queue
+    // TODO: Figure out why receive is failing (?)
+    while (!mq_receive(gtipc_mq.recv_queue, buf, sizeof(gtipc_response), NULL)) {
+        resp = (gtipc_response *)buf;
+        if (resp->request_id == request_id)
+            break;
+    }
+
+    if (resp == NULL) {
+        fprintf(stderr, "ERROR: No response received from server\n");
+        return GTIPC_RECV_ERROR;
+    } else if (resp->request_id != request_id) {
+        fprintf(stderr, "ERROR: Incorrect response received (expecting: %d, received: %d)\n",
+                request_id, resp->request_id);
+        return GTIPC_RECV_ERROR;
+    }
+
+    *arg = resp->arg;
+
+    return 0;
+}
+
+
 int gtipc_add(gtipc_arg *arg) {
-    printf("Entering add!\n");
+    int err;
 
-    printf("x = %d, y = %d\n", arg->x, arg->y);
+    #if DEBUG
+    fprintf(stderr, "INFO: Entering add!\n");
+    fprintf(stderr, "INFO: x = %d, y = %d\n", arg->x, arg->y);
+    #endif
 
-    pthread_t test_thread;
+    // Send request to remote IPC server
+    int request_id;
+    err = send_request(arg, GTIPC_ADD, &request_id); if (err) return err;
 
-    // Create a background thread
-    if (pthread_create(&test_thread, NULL, test_add, (void *)arg)) {
-        fprintf(stderr, "Error creating thread\n");
-        return 1;
-    }
+    // Wait for correct response
+    err = recv_response(request_id, arg); if (err) return err;
 
-    // Wait for thread to join
-    if (pthread_join(test_thread, NULL)) {
-        fprintf(stderr, "Error joining thread\n");
-        return 2;
-    }
+    return 0;
+}
+
+int gtipc_mul(gtipc_arg *arg) {
+    int err;
+
+    #if DEBUG
+    fprintf(stderr, "INFO: Entering mul!\n");
+    fprintf(stderr, "INFO: x = %d, y = %d\n", arg->x, arg->y);
+    #endif
+
+    // Send request to remote IPC server
+    int request_id;
+    err = send_request(arg, GTIPC_ADD, &request_id); if (err) return err;
+
+    // Wait for correct response
+    err = recv_response(request_id, arg); if (err) return err;
 
     return 0;
 }
