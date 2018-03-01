@@ -180,22 +180,14 @@ int recv_response(int request_id, gtipc_arg *arg) {
     gtipc_response *resp = NULL;
 
     // Wait for reply on recv queue
-    // TODO: Figure out why receive is failing (?)
-    while (!mq_receive(gtipc_mq.recv_queue, buf, sizeof(gtipc_response), NULL)) {
-        resp = (gtipc_response *)buf;
-        if (resp->request_id == request_id)
-            break;
-    }
-
-    if (resp == NULL) {
-        fprintf(stderr, "ERROR: No response received from server\n");
-        return GTIPC_RECV_ERROR;
-    } else if (resp->request_id != request_id) {
-        fprintf(stderr, "ERROR: Incorrect response received (expecting: %d, received: %d)\n",
-                request_id, resp->request_id);
+    // NOTE: here we assume that message is *synchronous*
+    if (mq_receive(gtipc_mq.recv_queue, buf, sizeof(gtipc_response), NULL) == -1) {
+        fprintf(stderr, "ERROR: No response received from server (error: %d)\n", errno);
         return GTIPC_RECV_ERROR;
     }
 
+    // Extract response and result
+    resp = (gtipc_response *)buf;
     *arg = resp->arg;
 
     return 0;

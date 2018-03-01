@@ -32,20 +32,20 @@ void mul(gtipc_arg *arg) {
 }
 
 void compute_service(gtipc_request *req, int pid) {
-    gtipc_arg arg = req->arg;
+    gtipc_arg *arg = &req->arg;
 
     // Print out info
-    printf("Received from %d: service=%d, x=%d, y=%d\n", pid, req->service, arg.x, arg.y);
+    printf("Received from %d: service=%d, x=%d, y=%d\n", pid, req->service, arg->x, arg->y);
 
     sleep(1);
 
     // Perform computation
     switch (req->service) {
         case GTIPC_ADD:
-            add(&arg);
+            add(arg);
             break;
         case GTIPC_MUL:
-            mul(&arg);
+            mul(arg);
             break;
         default:
             fprintf(stderr, "ERROR: Invalid service requested by client %d\n", pid);
@@ -53,36 +53,37 @@ void compute_service(gtipc_request *req, int pid) {
 }
 
 /**
- * Client thread handler. Each client gets its own thread.
+ * Client thread handler. Each client gets its own thread for queue management.
  */
-static void *client_handler(void *client_ptr) {
+static void *client_handler(void *node) {
     // Get current thread's client object, as passed in
-    client *client = &((client_list *)client_ptr)->client;
+    client *client = &((client_list *)node)->client;
 
     // Buffer for incoming gtipc_request
     char buf[sizeof(gtipc_request)];
     gtipc_request *req;
 
     while (1) {
-        // Wait for messages on receive queue
-        mq_receive(client->recv_queue, buf, sizeof(gtipc_request), NULL);
+        // Wait for message on receive queue
+        int err = mq_receive(client->recv_queue, buf, sizeof(gtipc_request), NULL);
 
-        // Extract request and argument
-        req = (gtipc_request *)buf;
+        // If receive error, ignore the request (TODO: Is this sound behavior?)
+        if (err != -1) {
+            // Extract request and argument
+            req = (gtipc_request *)buf;
 
-        // Compute
-        compute_service(req, client->pid);
+            // Compute
+            compute_service(req, client->pid);
 
-        // Send back response
-        gtipc_response resp;
-        resp.request_id = req->request_id;
-        resp.arg = req->arg;
+            // Send back response
+            gtipc_response resp;
+            resp.request_id = req->request_id;
+            resp.arg = req->arg;
 
-        if (mq_send(client->send_queue, (char *)&resp, sizeof(gtipc_response), 1)) {
-            fprintf(stderr, "ERROR: Failed to send response %d to client %d\n", resp.request_id, client->pid);
+            if (mq_send(client->send_queue, (char *)&resp, sizeof(gtipc_response), 1)) {
+                fprintf(stderr, "ERROR: Failed to send response %d to client %d\n", resp.request_id, client->pid);
+            }
         }
-
-        printf("Sent response to %d: x=%d, y=%d, res=%d\n", client->pid, resp.arg.x, resp.arg.y, resp.arg.res);
     }
 }
 
@@ -132,14 +133,22 @@ client_list *find_client(int pid) {
 /* Remove a client from the given clients list */
 void remove_client(client_list *node) {
     if (node != NULL) {
-        node->prev->next = node->next;
+        // If current is head AND tail, empty the list
+        if (node->prev == NULL && node->next == NULL)
+            clients = NULL;
+        else {
+            // If current is not head node, update previous node
+            if (node->prev != NULL)
+                node->prev->next = node->next;
 
-        if (node->next != NULL)
-            node->next->prev = node->prev;
-
-        // If removing tail node, update global tail
-        if (clients->tail == node)
-            clients->tail = node->prev;
+            // If current is not tail node, update next
+            if (node->next != NULL)
+                node->next->prev = node->prev;
+            else {
+                // Removing tail node, so update global tail
+                clients->tail = node->prev;
+            }
+        }
     }
 }
 
