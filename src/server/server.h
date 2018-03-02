@@ -12,9 +12,19 @@
  */
 typedef struct __client {
     pid_t pid;
+
+    // Queues
     mqd_t send_queue;
     mqd_t recv_queue;
-    pthread_t client_thread; // Reference to client's computation thread
+
+    // Shared memory
+    char *shm_addr;
+    pthread_mutex_t *shm_mutex;
+    char *shm_entries;
+    size_t shm_size;
+
+    // Reference to client's thread handler
+    pthread_t client_thread;
 } client;
 
 /**
@@ -31,7 +41,8 @@ typedef struct __client_node {
  * Client background thread arguments.
  */
 typedef struct __client_thread_arg {
-    int a;
+    gtipc_request req;
+    client *client;
 } client_thread_arg;
 
 /* Client register functions */
@@ -46,6 +57,6 @@ void signal_exit_server(int signo);
 /* Server API functions */
 void add(gtipc_arg *arg);
 void mul(gtipc_arg *arg);
-void compute_service(gtipc_request *req, int pid);
+void *compute_service(void *data);
 
 #endif

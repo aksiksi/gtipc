@@ -31,4 +31,6 @@ typedef enum __gtipc_registry_cmd {
     GTIPC_SERVER_CLOSE
 } gtipc_registry_cmd;
 
+typedef int gtipc_request_id;
+
 #endif //GTIPC_TYPES_H

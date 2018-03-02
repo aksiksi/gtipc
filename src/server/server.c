@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <signal.h>
+#include <sys/mman.h>
 
 #include "gtipc/messages.h"
 #include "gtipc/params.h"
@@ -18,6 +19,15 @@ pthread_t registry_thread;
 // Doubly linked list of registered clients
 client_list *clients = NULL;
 
+// Service thread management
+static int MAX_THREADS = 20;
+
+struct __service_threads {
+    int curr;
+    pthread_mutex_t curr_mutex;
+    pthread_cond_t curr_cond;
+} service_threads;
+
 void exit_error(char *msg) {
     fprintf(stderr, "%s", msg);
     exit(EXIT_FAILURE);
@@ -31,13 +41,15 @@ void mul(gtipc_arg *arg) {
     arg->res = arg->x * arg->y;
 }
 
-void compute_service(gtipc_request *req, int pid) {
+/**
+ * Compute service thread for a single request.
+ */
+void *compute_service(void *data) {
+    client_thread_arg *thread_arg = (client_thread_arg *)data;
+
+    client *client = thread_arg->client;
+    gtipc_request *req = &thread_arg->req;
     gtipc_arg *arg = &req->arg;
-
-    // Print out info
-    printf("Received from %d: service=%d, x=%d, y=%d\n", pid, req->service, arg->x, arg->y);
-
-    sleep(1);
 
     // Perform computation
     switch (req->service) {
@@ -48,8 +60,47 @@ void compute_service(gtipc_request *req, int pid) {
             mul(arg);
             break;
         default:
-            fprintf(stderr, "ERROR: Invalid service requested by client %d\n", pid);
+            fprintf(stderr, "ERROR: Invalid service requested by client %d\n", req->pid);
     }
+
+    // Mark shared entry as DONE (i.e., request has been served)
+    // And write argument to memory
+    gtipc_shared_entry *entry = (gtipc_shared_entry *)(client->shm_addr + req->entry_idx * GTIPC_SHM_SIZE);
+    pthread_mutex_t *mutex = &entry->mutex;
+    pthread_mutex_lock(mutex);
+    entry->done = 1;
+    entry->arg = *arg;
+    pthread_mutex_unlock(mutex);
+
+    // Decrement number of threads and signal condition
+    pthread_mutex_lock(&service_threads.curr_mutex);
+    service_threads.curr--;
+    pthread_cond_signal(&service_threads.curr_cond);
+    pthread_mutex_unlock(&service_threads.curr_mutex);
+
+    // Free allocated thread arg
+    free(thread_arg);
+
+    return NULL;
+}
+
+void spawn_compute_thread(gtipc_request *req, client *client) {
+    // Spawn a compute background thread once one is available (see: MAX_THREADS)
+    pthread_mutex_lock(&service_threads.curr_mutex);
+    while (service_threads.curr >= MAX_THREADS)
+        pthread_cond_wait(&service_threads.curr_cond, &service_threads.curr_mutex);
+
+    // Allocate a new thread arg on heap
+    client_thread_arg *thread_arg = malloc(sizeof(client_thread_arg));
+    thread_arg->req = *req;
+    thread_arg->client = client;
+
+    pthread_t thread;
+    pthread_create(&thread, NULL, compute_service, (void *)thread_arg);
+
+    service_threads.curr++;
+
+    pthread_mutex_unlock(&service_threads.curr_mutex);
 }
 
 /**
@@ -72,17 +123,8 @@ static void *client_handler(void *node) {
             // Extract request and argument
             req = (gtipc_request *)buf;
 
-            // Compute
-            compute_service(req, client->pid);
-
-            // Send back response
-            gtipc_response resp;
-            resp.request_id = req->request_id;
-            resp.arg = req->arg;
-
-            if (mq_send(client->send_queue, (char *)&resp, sizeof(gtipc_response), 1)) {
-                fprintf(stderr, "ERROR: Failed to send response %d to client %d\n", resp.request_id, client->pid);
-            }
+            // Spawn background thread for computation
+            spawn_compute_thread(req, client);
         }
     }
 }
@@ -185,6 +227,8 @@ int register_client(gtipc_registry *reg) {
     client client;
 
     client.pid = reg->pid;
+
+    // Open queues
     client.send_queue = mq_open(reg->recv_queue_name, O_RDWR);
     client.recv_queue = mq_open(reg->send_queue_name, O_RDWR);
 
@@ -194,12 +238,28 @@ int register_client(gtipc_registry *reg) {
         exit(EXIT_FAILURE);
     }
 
+    // Map shared memory
+    int fd;
+
+    if ((fd = shm_open(reg->shm_name, O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
+        fprintf(stderr, "ERROR: Failed to open shared mem object for client %d\n", client.pid);
+        exit(EXIT_FAILURE);
+    }
+
+    client.shm_size = sizeof(gtipc_shared_entry) * GTIPC_SHM_SIZE;
+    ftruncate(fd, client.shm_size);
+
+    // Map shared memory with GTIPC_SHM_SIZE * gtipc_shared_entry
+    client.shm_addr = mmap(NULL, client.shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+    close(fd);
+
     // Append newly created client to global list
     client_list *node = malloc(sizeof(client_list));
     node->client = client;
     append_client(node);
 
-    // Spin up client's background thread
+    // Spin up client's background handler thread
     pthread_create(&client.client_thread, NULL, client_handler, (void *)node);
 
     #if DEBUG
@@ -225,6 +285,7 @@ int unregister_client(int pid, int close) {
         registry.cmd = GTIPC_SERVER_CLOSE;
 
         // Send poison pill to client
+        // TODO: FIX THIS SO THAT SEND QUEUE RECEIVE REGISTRY MESSAGES
         if (mq_send(client->send_queue, (char *)&registry, sizeof(gtipc_registry), 1)) {
             fprintf(stderr, "ERROR: Could not send poison pill message to client %d\n", client->pid);
         }
@@ -236,7 +297,6 @@ int unregister_client(int pid, int close) {
     // Free up resources used by client
     mq_close(client->send_queue);
     mq_close(client->recv_queue);
-
     pthread_cancel(client->client_thread);
 
     free(node);
@@ -294,6 +354,9 @@ void init_server() {
     if (pthread_create(&registry_thread, NULL, registry_handler, NULL)) {
         exit_error("FATAL: Failed to create registry background thread!\n");
     }
+
+    // Initialize number of service threads to 0
+    service_threads.curr = 0;
 }
 
 int main(int argc, char **argv) {

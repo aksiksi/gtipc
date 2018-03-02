@@ -13,7 +13,10 @@ static char* GTIPC_SENDQ_PREFIX = "/gtipc-queue-send-";
 static char* GTIPC_RECVQ_PREFIX = "/gtipc-queue-recv-";
 
 // Prefix for POSIX shared memory
-static char* GTIPC_SHM_PREFIX = "/gtipc-memxyz-";
+static char* GTIPC_SHM_PREFIX = "/gtipc-shmxyz-";
+
+// Number of gtipc_arg elements in shared segment
+static int GTIPC_SHM_SIZE = 1024;
 
 // Name of global client registry queue (created once by server)
 static char* GTIPC_REGISTRY_QUEUE = "/gtipc-queue-registry";
