@@ -6,34 +6,44 @@
 
 int main() {
     gtipc_arg arg;
-    arg.x = 10;
-    arg.y = 11;
 
-    int err;
+    int err, i;
 
     gtipc_init();
 
-    // Perform async request
-    gtipc_request_id id;
-    err = gtipc_async(&arg, GTIPC_MUL, &id);
+    // Perform 1024 async requests
+    gtipc_arg async_args[2048];
+    gtipc_request_key keys[2048];
 
-    // Now perform sync request
-    err = gtipc_sync(&arg, GTIPC_ADD);
-
-    if (err) {
-        printf("Error: %d\n", err);
-        return 0;
+    for (i = 0; i < 2048; i++) {
+        async_args[i].x = i * 20;
+        async_args[i].y = i * 22;
+        err = gtipc_async(&async_args[i], GTIPC_MUL, &keys[i]);
     }
 
-    printf("x = %d, y = %d, res = %d\n", arg.x, arg.y, arg.res);
+    // Now perform 10 sync requests
+    gtipc_arg sync_args[10];
 
-    arg.x = 1000;
+    for (i = 0; i < 10; i++) {
+        sync_args[i].x = i * 10;
+        sync_args[i].y = i * 12;
 
+        err = gtipc_sync(&sync_args[i], GTIPC_ADD);
+
+        printf("Sync %d: %d + %d = %d\n", i,
+               sync_args[i].x, sync_args[i].y, sync_args[i].res);
+    }
+
+    // Sleep for a bit
     sleep(2);
 
-    gtipc_async_get(id, &arg);
-
-    printf("x = %d, y = %d, res = %d\n", arg.x, arg.y, arg.res);
+    // Now get all async requests
+    gtipc_async_join(keys, async_args, 2048);
+//    for (i = 0; i < 2048; i++) {
+//        gtipc_async_wait(keys[i], &async_args[i]);
+//        printf("Async %d: %d * %d = %d\n", i,
+//               async_args[i].x, async_args[i].y, async_args[i].res);
+//    }
 
     gtipc_exit();
 

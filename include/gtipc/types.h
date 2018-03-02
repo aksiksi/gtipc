@@ -27,10 +27,11 @@ typedef enum __gtipc_service {
 typedef enum __gtipc_registry_cmd {
     GTIPC_CLIENT_REGISTER,
     GTIPC_CLIENT_UNREGISTER,
+    GTIPC_CLIENT_SHM_RESIZE,
     GTIPC_CLIENT_CLOSE,
     GTIPC_SERVER_CLOSE
 } gtipc_registry_cmd;
 
-typedef int gtipc_request_id;
+typedef int gtipc_request_key;
 
 #endif //GTIPC_TYPES_H

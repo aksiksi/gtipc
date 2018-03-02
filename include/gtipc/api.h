@@ -35,15 +35,24 @@ extern int gtipc_sync(gtipc_arg *arg, gtipc_service service);
  * @param id Return: unique identifier for current request.
  * @return 0 if no error
  */
-extern int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_id *id);
+extern int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_key *key);
 
 /**
- * Wait for an asynchronous request to complete.
+ * Wait for a single asynchronous request to complete.
  *
  * @param id Request ID
  * @param arg Result of service
  * @return 0 if no error
  */
-extern int gtipc_async_get(gtipc_request_id id, gtipc_arg *arg);
+extern int gtipc_async_wait(gtipc_request_key key, gtipc_arg *arg);
+
+/**
+ * Join on a group of async requests.
+ *
+ * @param keys Array of request keys
+ * @param args Array of args into which results are written to
+ * @param size Size of each array
+ */
+extern int gtipc_async_join(gtipc_request_key *keys, gtipc_arg *args, int size);
 
 #endif

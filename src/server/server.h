@@ -19,12 +19,12 @@ typedef struct __client {
 
     // Shared memory
     char *shm_addr;
-    pthread_mutex_t *shm_mutex;
-    char *shm_entries;
     size_t shm_size;
+    char shm_name[100];
 
     // Reference to client's thread handler
     pthread_t client_thread;
+    int stop_client_thread;
 } client;
 
 /**
@@ -49,10 +49,13 @@ typedef struct __client_thread_arg {
 int register_client(gtipc_registry *reg);
 int unregister_client(int pid, int close);
 
+/* POSIX IPC setup and cleanup */
+void open_shm_object(gtipc_registry *reg, client *client);
+void resize_shm_object(client *client);
+
 /* Internal functions */
 void init_server();
 void exit_server();
-void signal_exit_server(int signo);
 
 /* Server API functions */
 void add(gtipc_arg *arg);

@@ -33,12 +33,9 @@ struct __client {
     // Shared memory
     char *shm_addr;
     char shm_name[100];
-    pthread_mutex_t *shm_mutex;
+    int shm_fd;
     size_t shm_size;
 } client;
-
-// Callback registry
-
 
 /* Create all required message queues */
 int create_queues() {
@@ -100,21 +97,18 @@ int create_shm_object() {
     written += sprintf(client.shm_name, "%s", GTIPC_SHM_PREFIX);
     sprintf(client.shm_name + written, "%ld", (long)getpid());
 
-    int fd;
-
     // Create and open the shared memory object
-    if ((fd = shm_open(client.shm_name, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
+    if ((client.shm_fd = shm_open(client.shm_name, O_CREAT | O_EXCL | O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
         fprintf(stderr, "ERROR: Failed to create shared mem object\n");
         return GTIPC_SHM_ERROR;
     }
 
     // Set exact length required for shared mem object
-    // First entry in shared mem is a mutex, followed by all shared entries
     client.shm_size = sizeof(gtipc_shared_entry) * GTIPC_SHM_SIZE;
-    ftruncate(fd, client.shm_size);
+    ftruncate(client.shm_fd, client.shm_size);
 
     // Map shared memory with GTIPC_SHM_SIZE * gtipc_shared_entry
-    client.shm_addr = mmap(NULL, client.shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    client.shm_addr = mmap(NULL, client.shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, client.shm_fd, 0);
     if (client.shm_addr == MAP_FAILED) {
         fprintf(stderr, "FATAL: Failed to map shared memory region (errno %d)\n", errno);
         return GTIPC_SHM_ERROR;
@@ -125,6 +119,10 @@ int create_shm_object() {
     gtipc_shared_entry se;
     se.used = 0;
 
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+
     for (i = 0; i < GTIPC_SHM_SIZE; i++) {
         // Copy over entire object to shared mem
         memcpy(client.shm_addr + i*sizeof(gtipc_shared_entry), &se, sizeof(gtipc_shared_entry));
@@ -134,14 +132,10 @@ int create_shm_object() {
         pthread_mutex_t *mutex = &entry->mutex;
 
         // Init the mutex as shared
-        pthread_mutexattr_t attr;
-        pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
         pthread_mutex_init(mutex, &attr);
-        pthread_mutexattr_destroy(&attr);
     }
 
-    // Descriptor not needed anymore
-    close(fd);
+    pthread_mutexattr_destroy(&attr);
 
     return 0;
 }
@@ -151,6 +145,9 @@ int create_shm_object() {
  * @return
  */
 int destroy_shm_object() {
+    // Close shm file descriptor
+    close(client.shm_fd);
+
     // Unlink the shared mem object
     if (shm_unlink(client.shm_name)) {
         fprintf(stderr, "ERROR: Failed to unlink shared mem object\n");
@@ -227,19 +224,105 @@ int gtipc_exit() {
     return 0;
 }
 
+int resize_shm_object() {
+    size_t new_shm_size = ((client.shm_size / sizeof(gtipc_shared_entry)) + GTIPC_SHM_SIZE) * sizeof(gtipc_shared_entry);
+
+    // Reached max size, so do not resize
+    if (new_shm_size > GTIPC_SHM_MAX_SIZE)
+        return 0;
+
+    // Open the shared mem object
+    int fd;
+
+    if ((fd = shm_open(client.shm_name, O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
+        fprintf(stderr, "ERROR: Failed to create shared mem object\n");
+        return GTIPC_SHM_ERROR;
+    }
+
+    // Resize the object
+    ftruncate(fd, new_shm_size);
+
+    // Map the resized object and initialize it
+    char *new_shm_addr = mmap(NULL, new_shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (new_shm_addr == MAP_FAILED) {
+        fprintf(stderr, "FATAL: Failed to remap shared memory region (errno %d)\n", errno);
+        return GTIPC_SHM_ERROR;
+    }
+
+    // Initialize shared memory
+    int i;
+    gtipc_shared_entry se;
+    se.used = 0;
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+
+    for (i = 0; i < (new_shm_size / sizeof(gtipc_shared_entry)); i++) {
+        // Copy over entire object to newly created shared mem
+        memcpy(new_shm_addr + i*sizeof(gtipc_shared_entry), &se, sizeof(gtipc_shared_entry));
+
+        // Get handle to shared entry mutex
+        gtipc_shared_entry *entry = (gtipc_shared_entry *)(new_shm_addr + i*sizeof(gtipc_shared_entry));
+        pthread_mutex_t *mutex = &entry->mutex;
+
+        // Init the mutex as shared
+        pthread_mutex_init(mutex, &attr);
+    }
+
+    pthread_mutexattr_destroy(&attr);
+
+    // Notify the server about the resize operation
+    gtipc_request req;
+    req.request_id = -1;
+    mq_send(client.send_queue, (char *)&req, sizeof(gtipc_request), 100); // High priority message
+
+    // Wait for server to respond
+    char buf[sizeof(gtipc_response)];
+    gtipc_response *resp;
+    mq_receive(client.recv_queue, (char *)buf, sizeof(gtipc_response), NULL);
+    resp = (gtipc_response *)buf;
+
+    // Server is ready to rumble, resize done!
+    if (resp->request_id == -1) {
+        // Unmap memory old shared mem
+        munmap(client.shm_addr, client.shm_size);
+
+        // Update global pointers
+        client.shm_addr = new_shm_addr;
+        client.shm_size = new_shm_size;
+        client.shm_fd = fd;
+
+        return 0;
+    }
+
+    return GTIPC_SHM_ERROR;
+}
+
 /**
  * Finds an unused shared memory entry, takes it, and returns its index.
- * Note that this function will *block* until an unused entry is found.
+ *
+ * If first half of shared memory is full, client will expand the size of shared memory
+ * in coordination with the server.
  *
  * @return index of entry
  */
 int find_shm_entry(gtipc_arg *arg) {
     int idx = 0;
+    char *target;
     gtipc_shared_entry *entry;
+
+    size_t shm_size = client.shm_size / sizeof(gtipc_shared_entry);
+    int half_full = (int)(shm_size / 2);
 
     // Iterate over all entries in shared memory
     while (1) {
-        entry = (gtipc_shared_entry *)(client.shm_addr + idx * sizeof(gtipc_shared_entry));
+        // The memory is half full, so resize it!
+        if (idx == half_full)
+            resize_shm_object();
+
+        target = client.shm_addr + idx * sizeof(gtipc_shared_entry);
+        entry = (gtipc_shared_entry *)target;
         pthread_mutex_t *mutex = &entry->mutex;
 
         pthread_mutex_lock(mutex);
@@ -249,13 +332,15 @@ int find_shm_entry(gtipc_arg *arg) {
             entry->arg = *arg;
             entry->used = 1;
             entry->done = 0;
+
             pthread_mutex_unlock(mutex);
+
             break;
         }
 
         pthread_mutex_unlock(mutex);
 
-        idx = (idx + 1) % GTIPC_SHM_SIZE;
+        idx = (idx + 1) % (int)shm_size;
     }
 
     return idx;
@@ -264,9 +349,11 @@ int find_shm_entry(gtipc_arg *arg) {
 /**
  * Send IPC request to server and return ID.
  *
+ * Request is sent over shared message queue.
+ *
  * @return 0 if no error, or GTIPC_SEND_ERROR
  */
-int send_request(gtipc_arg *arg, gtipc_service service, gtipc_request_id *request_id) {
+int send_request(gtipc_arg *arg, gtipc_service service, gtipc_request_key *key) {
     // Create an IPC request object
     gtipc_request req;
     req.service = service;
@@ -288,10 +375,35 @@ int send_request(gtipc_arg *arg, gtipc_service service, gtipc_request_id *reques
         return GTIPC_SEND_ERROR;
     }
 
-    // Request ID is the index of entry in shared memory
-    *request_id = req.entry_idx;
+    // Key is the index of entry in shared memory
+    *key = req.entry_idx;
 
     return 0;
+}
+
+/**
+ * Check if a given request is completed in shared mem.
+ */
+int is_done(gtipc_request_key key, gtipc_arg *arg) {
+    // Retrieve pointer to relevant entry
+    char *target = client.shm_addr + key * sizeof(gtipc_shared_entry);
+    gtipc_shared_entry *entry = (gtipc_shared_entry *)target;
+    pthread_mutex_t *mutex = &entry->mutex;
+
+    int done = 0;
+
+    pthread_mutex_lock(mutex);
+
+    if (entry->done == 1) {
+        // Mark as unused
+        entry->used = 0;
+        *arg = entry->arg;
+        done = 1;
+    }
+
+    pthread_mutex_unlock(mutex);
+
+    return done;
 }
 
 /**
@@ -301,31 +413,27 @@ int send_request(gtipc_arg *arg, gtipc_service service, gtipc_request_id *reques
  * @param arg Result returned by server
  * @return
  */
-int recv_response(int entry_idx, gtipc_arg *arg) {
+int recv_response(gtipc_request_key key, gtipc_arg *arg) {
     // Retrieve pointer to relevant entry
-    gtipc_shared_entry *entry;
-    entry = (gtipc_shared_entry *)(client.shm_addr + entry_idx * sizeof(gtipc_shared_entry));
+    char *target = client.shm_addr + key * sizeof(gtipc_shared_entry);
+    gtipc_shared_entry *entry = (gtipc_shared_entry *)target;
     pthread_mutex_t *mutex = &entry->mutex;
 
-    // Spin on done flag
+    // 0.1 ms backoff
+    unsigned int backoff = 100;
+
+    // Spin while not done
     while (1) {
-        pthread_mutex_lock(mutex);
+        // Sleep for short period before acquiring the lock
+        usleep(backoff);
 
-        if (entry->done == 1) {
-            pthread_mutex_unlock(mutex);
+        // Check if request served
+        if (is_done(key, arg))
             break;
-        }
 
-        pthread_mutex_unlock(mutex);
+        // Exponential backoff
+        backoff *= 2;
     }
-
-    // Obtain result returned by server
-    *arg = entry->arg;
-
-    // Set entry as unused
-    pthread_mutex_lock(client.shm_mutex);
-    entry->used = 0;
-    pthread_mutex_unlock(client.shm_mutex);
 
     return 0;
 }
@@ -355,22 +463,48 @@ int gtipc_sync(gtipc_arg *arg, gtipc_service service) {
  *
  * @param arg Argument to the service.
  * @param service Type of service required.
- * @param id Unique identifier for current request.
+ * @param key Unique key for current request.
  * @return 0 if no error
  */
-int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_id *id) {
+int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_key *key) {
     // Send request to remote IPC server
-    return send_request(arg, service, id);
+    return send_request(arg, service, key);
 }
 
 /**
- * Wait for an asynchronous request to complete.
+ * Wait for a single asynchronous request to complete.
  *
- * @param id Request ID
+ * @param key Request key
  * @param arg Result of service
  * @return 0 if no error
  */
-int gtipc_async_get(gtipc_request_id id, gtipc_arg *arg) {
+int gtipc_async_wait(gtipc_request_key key, gtipc_arg *arg) {
     // Wait for correct response
-    return recv_response(id, arg);
+    return recv_response(key, arg);
+}
+
+/**
+ * Join on a group of async requests.
+ *
+ * @param keys Array of request keys
+ * @param args Array of args into which results are written to
+ * @param size Size of each array
+ */
+int gtipc_async_join(gtipc_request_key *keys, gtipc_arg *args, int size) {
+    if (size <= 0)
+        return -1;
+
+    int i = 0;
+    int done = 0;
+
+    while (1) {
+        if (done == size)
+            break;
+
+        done += is_done(*(keys + i), args + i);
+
+        i = (i + 1) % size;
+    }
+
+    return 0;
 }

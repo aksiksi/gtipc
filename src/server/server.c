@@ -1,8 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <signal.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <time.h>
 
 #include "gtipc/messages.h"
 #include "gtipc/params.h"
@@ -15,12 +16,13 @@ mqd_t global_registry;
 
 // Registry thread
 pthread_t registry_thread;
+static int STOP_REGISTRY = 0; // Flag to stop registry thread
 
 // Doubly linked list of registered clients
 client_list *clients = NULL;
 
 // Service thread management
-static int MAX_THREADS = 20;
+static int MAX_THREADS = 100;
 
 struct __service_threads {
     int curr;
@@ -42,16 +44,62 @@ void mul(gtipc_arg *arg) {
 }
 
 /**
+ * Mark a request as complete in shared memory
+ * @param entry Pointer to completed entry
+ */
+void request_complete(gtipc_shared_entry *entry, gtipc_arg *arg) {
+    pthread_mutex_t *mutex = &entry->mutex;
+    pthread_mutex_lock(mutex);
+    entry->done = 1;
+    entry->arg = *arg;
+    pthread_mutex_unlock(mutex);
+}
+
+void cleanup_compute_thread(client_thread_arg *thread_arg) {
+    // Decrement number of threads and signal condition
+    pthread_mutex_lock(&service_threads.curr_mutex);
+    service_threads.curr--;
+    pthread_cond_signal(&service_threads.curr_cond);
+    pthread_mutex_unlock(&service_threads.curr_mutex);
+
+    // Free allocated thread arg
+    free(thread_arg);
+}
+
+void spawn_compute_thread(gtipc_request *req, client *client) {
+    // Spawn a compute background thread once one is available (see: MAX_THREADS)
+    pthread_mutex_lock(&service_threads.curr_mutex);
+    while (service_threads.curr >= MAX_THREADS)
+        pthread_cond_wait(&service_threads.curr_cond, &service_threads.curr_mutex);
+
+    // Increment running thread counter
+    service_threads.curr++;
+
+    pthread_mutex_unlock(&service_threads.curr_mutex);
+
+    // Allocate a new thread arg on heap
+    client_thread_arg *thread_arg = malloc(sizeof(client_thread_arg));
+    thread_arg->req = *req;
+    thread_arg->client = client;
+
+    // Spawn a new thread to serve the request
+    pthread_t thread;
+    pthread_create(&thread, NULL, compute_service, (void *)thread_arg);
+}
+
+/**
  * Compute service thread for a single request.
  */
 void *compute_service(void *data) {
     client_thread_arg *thread_arg = (client_thread_arg *)data;
 
+    // Extract current client, request, and argument
     client *client = thread_arg->client;
     gtipc_request *req = &thread_arg->req;
     gtipc_arg *arg = &req->arg;
+    gtipc_shared_entry *entry = (gtipc_shared_entry *)(client->shm_addr + req->entry_idx * sizeof(gtipc_shared_entry));
 
-    // Perform computation
+    // Perform computation based on requested service
     switch (req->service) {
         case GTIPC_ADD:
             add(arg);
@@ -63,44 +111,14 @@ void *compute_service(void *data) {
             fprintf(stderr, "ERROR: Invalid service requested by client %d\n", req->pid);
     }
 
-    // Mark shared entry as DONE (i.e., request has been served)
-    // And write argument to memory
-    gtipc_shared_entry *entry = (gtipc_shared_entry *)(client->shm_addr + req->entry_idx * GTIPC_SHM_SIZE);
-    pthread_mutex_t *mutex = &entry->mutex;
-    pthread_mutex_lock(mutex);
-    entry->done = 1;
-    entry->arg = *arg;
-    pthread_mutex_unlock(mutex);
+    // Mark entry in shared memory as DONE (i.e., request has been served)
+    request_complete(entry, arg);
 
-    // Decrement number of threads and signal condition
-    pthread_mutex_lock(&service_threads.curr_mutex);
-    service_threads.curr--;
-    pthread_cond_signal(&service_threads.curr_cond);
-    pthread_mutex_unlock(&service_threads.curr_mutex);
+    cleanup_compute_thread(thread_arg);
 
-    // Free allocated thread arg
-    free(thread_arg);
+    printf("Client %d, request %d: done = 1\n", client->pid, req->request_id);
 
     return NULL;
-}
-
-void spawn_compute_thread(gtipc_request *req, client *client) {
-    // Spawn a compute background thread once one is available (see: MAX_THREADS)
-    pthread_mutex_lock(&service_threads.curr_mutex);
-    while (service_threads.curr >= MAX_THREADS)
-        pthread_cond_wait(&service_threads.curr_cond, &service_threads.curr_mutex);
-
-    // Allocate a new thread arg on heap
-    client_thread_arg *thread_arg = malloc(sizeof(client_thread_arg));
-    thread_arg->req = *req;
-    thread_arg->client = client;
-
-    pthread_t thread;
-    pthread_create(&thread, NULL, compute_service, (void *)thread_arg);
-
-    service_threads.curr++;
-
-    pthread_mutex_unlock(&service_threads.curr_mutex);
 }
 
 /**
@@ -114,17 +132,32 @@ static void *client_handler(void *node) {
     char buf[sizeof(gtipc_request)];
     gtipc_request *req;
 
-    while (1) {
+    // Timeout parameter for message queue operations
+    struct timespec ts;
+
+    while (!client->stop_client_thread) {
+        // Setup a 10 ms timeout
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 10000000;
+        ts.tv_sec = 0;
+
         // Wait for message on receive queue
-        int err = mq_receive(client->recv_queue, buf, sizeof(gtipc_request), NULL);
+        ssize_t received = mq_timedreceive(client->recv_queue, buf, sizeof(gtipc_request), NULL, &ts);
 
         // If receive error, ignore the request (TODO: Is this sound behavior?)
-        if (err != -1) {
+        if (received != -1) {
             // Extract request and argument
             req = (gtipc_request *)buf;
 
-            // Spawn background thread for computation
-            spawn_compute_thread(req, client);
+            if (req->request_id == -1) {
+                // Resize request received from client
+                resize_shm_object(client);
+            }
+
+            else {
+                // Spawn background thread for computation
+                spawn_compute_thread(req, client);
+            }
         }
     }
 }
@@ -134,7 +167,15 @@ static void *registry_handler(void *unused) {
     char recv_buf[sizeof(gtipc_registry)];
     gtipc_registry *reg;
 
-    while (1) {
+    // Timeout parameter for message queue operations
+    struct timespec ts;
+
+    while (!STOP_REGISTRY) {
+        // Setup a 10 ms timeout
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 10000000;
+        ts.tv_sec = 0;
+
         // Wait for a new registry message from client (blocking)
         mq_receive(global_registry, recv_buf, sizeof(gtipc_registry), NULL);
 
@@ -219,6 +260,74 @@ void append_client(client_list *node) {
 }
 
 /**
+ * Open a shared memory object based on given name.
+ * @param reg
+ * @param client
+ */
+void open_shm_object(gtipc_registry *reg, client *client) {
+    // Map shared memory
+    int fd;
+
+    if ((fd = shm_open(reg->shm_name, O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
+        fprintf(stderr, "ERROR: Failed to open shared mem object for client %d\n", client->pid);
+        exit(EXIT_FAILURE);
+    }
+
+    memcpy(client->shm_name, reg->shm_name, 100);
+
+    // Determine size of shared mem object
+    struct stat s;
+    fstat(fd, &s);
+    client->shm_size = (size_t)s.st_size;
+
+    // Map shared memory based on size determined
+    client->shm_addr = mmap(NULL, client->shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+    close(fd);
+}
+
+/**
+ * Resize the shared mem object in coordination with client.
+ */
+void resize_shm_object(client *client) {
+    int fd;
+
+    // Open new shared memory object
+    if ((fd = shm_open(client->shm_name, O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
+        fprintf(stderr, "ERROR: Failed to resize shared mem object for client %d\n", client->pid);
+        exit(EXIT_FAILURE);
+    }
+
+    // Determine size of new shared mem object
+    struct stat s;
+    fstat(fd, &s);
+    size_t new_shm_size = (size_t)s.st_size;
+
+    // Map new shared memory segment
+    char *new_shm_addr = mmap(NULL, new_shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+
+    // Wait for all in-progress client requests to complete
+    pthread_mutex_lock(&service_threads.curr_mutex);
+    while (service_threads.curr != 0)
+        pthread_cond_wait(&service_threads.curr_cond, &service_threads.curr_mutex);
+    pthread_mutex_unlock(&service_threads.curr_mutex);
+
+    // Copy over old shared segment to new segment
+    memcpy(new_shm_addr, client->shm_addr, client->shm_size);
+
+    // Send notification to client that new segment is ready
+    gtipc_response resp;
+    resp.request_id = -1;
+    mq_send(client->send_queue, (char *)&resp, sizeof(gtipc_response), 1);
+
+    // Switch shared memory refs
+    client->shm_addr = new_shm_addr;
+    client->shm_size = new_shm_size;
+
+    close(fd);
+}
+
+/**
  * Given an incoming registry object, create a client
  * and add it to the clients list.
  */
@@ -238,21 +347,8 @@ int register_client(gtipc_registry *reg) {
         exit(EXIT_FAILURE);
     }
 
-    // Map shared memory
-    int fd;
-
-    if ((fd = shm_open(reg->shm_name, O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
-        fprintf(stderr, "ERROR: Failed to open shared mem object for client %d\n", client.pid);
-        exit(EXIT_FAILURE);
-    }
-
-    client.shm_size = sizeof(gtipc_shared_entry) * GTIPC_SHM_SIZE;
-    ftruncate(fd, client.shm_size);
-
-    // Map shared memory with GTIPC_SHM_SIZE * gtipc_shared_entry
-    client.shm_addr = mmap(NULL, client.shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-
-    close(fd);
+    // Open the shared mem object
+    open_shm_object(reg, &client);
 
     // Append newly created client to global list
     client_list *node = malloc(sizeof(client_list));
@@ -260,6 +356,7 @@ int register_client(gtipc_registry *reg) {
     append_client(node);
 
     // Spin up client's background handler thread
+    client.stop_client_thread = 0;
     pthread_create(&client.client_thread, NULL, client_handler, (void *)node);
 
     #if DEBUG
@@ -295,9 +392,16 @@ int unregister_client(int pid, int close) {
     remove_client(node);
 
     // Free up resources used by client
+    // Close queues
     mq_close(client->send_queue);
     mq_close(client->recv_queue);
-    pthread_cancel(client->client_thread);
+
+    // Unmap memory
+    munmap(client->shm_addr, client->shm_size);
+
+    // Stop client handler thread
+    client->stop_client_thread = 1;
+//    pthread_cancel(client->client_thread);
 
     free(node);
 
@@ -305,12 +409,6 @@ int unregister_client(int pid, int close) {
 }
 
 void exit_server() {
-    // Close and unlink registry queue
-    if (global_registry) {
-        mq_close(global_registry);
-        mq_unlink(GTIPC_REGISTRY_QUEUE);
-    }
-
     // Perform client cleanup
     client_list *list = clients;
 
@@ -318,18 +416,20 @@ void exit_server() {
         unregister_client(list->client.pid, 1);
         list = list->next;
     }
-}
 
-void signal_exit_server(int signo) {
-    exit_server();
+    // Close and unlink registry queue
+    if (global_registry) {
+        mq_close(global_registry);
+        mq_unlink(GTIPC_REGISTRY_QUEUE);
+    }
+
+    // Stop registry thread
+    STOP_REGISTRY = 1;
 }
 
 void init_server() {
     // Set exit handler for cleanup
     atexit(exit_server);
-
-    // Setup signal handler for SIGINT cleanup
-    signal(SIGINT, signal_exit_server);
 
     // Set queue attrs first to fix message size
     struct mq_attr attr;
