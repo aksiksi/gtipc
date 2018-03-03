@@ -47,6 +47,15 @@ extern int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_key 
 extern int gtipc_async_wait(gtipc_request_key key, gtipc_arg *arg);
 
 /**
+ * Given a list of request keys, calls a callback function on each key and argument once request is completed.
+ * @param keys An array of request of keys
+ * @param size Size of keys array
+ * @param fn Function to call on each key and arg
+ * @return
+ */
+extern int gtipc_async_map(gtipc_request_key *keys, int size, void (*fn)(gtipc_request_key, gtipc_arg *));
+
+/**
  * Join on a group of async requests.
  *
  * @param keys Array of request keys

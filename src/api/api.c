@@ -484,6 +484,42 @@ int gtipc_async_wait(gtipc_request_key key, gtipc_arg *arg) {
 }
 
 /**
+ * Given a list of request keys, calls a function on each key and argument once the request is completed.
+ *
+ * @param keys An array of request keys
+ * @param size Size (>= 0) of keys array
+ * @param fn Function to call on each key and arg
+ * @return
+ */
+int gtipc_async_map(gtipc_request_key *keys, int size, void (*fn)(gtipc_request_key, gtipc_arg *)) {
+    if (size <= 0)
+        return -1;
+
+    int i = 0;
+    int done = 0;
+
+    // Allocate a key done array
+    char *key_done = calloc((size_t)size, sizeof(char));
+
+    gtipc_arg arg;
+
+    while (1) {
+        if (done == size)
+            break;
+
+        if (!key_done[i] && is_done(keys[i], &arg)) {
+            done += 1;
+            key_done[i] = 1;
+            fn(keys[i], &arg);
+        }
+
+        i = (i + 1) % size;
+    }
+
+    return 0;
+}
+
+/**
  * Join on a group of async requests.
  *
  * @param keys Array of request keys
@@ -501,7 +537,7 @@ int gtipc_async_join(gtipc_request_key *keys, gtipc_arg *args, int size) {
         if (done == size)
             break;
 
-        done += is_done(*(keys + i), args + i);
+        done += is_done(keys[i], args + i);
 
         i = (i + 1) % size;
     }

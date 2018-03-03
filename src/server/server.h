@@ -6,11 +6,30 @@
 #include <pthread.h>
 
 /**
+ * Queue for thread requests.
+ */
+typedef struct __request_queue {
+    gtipc_request data;
+    struct __request_queue *tail;
+    struct __request_queue *next;
+} request_queue;
+
+// Worker thread management for a single client
+#define NUM_THREADS 10
+typedef struct __client_workers {
+    request_queue *queue;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    pthread_t threads[NUM_THREADS];
+} client_workers;
+
+/**
  * Describes a single client as seen by the server.
  *
  * Note: **inverted** use of send and recv i.e. send is from server to client
  */
 typedef struct __client {
+    // Client PID
     pid_t pid;
 
     // Queues
@@ -25,6 +44,10 @@ typedef struct __client {
     // Reference to client's thread handler
     pthread_t client_thread;
     int stop_client_thread;
+    int num_threads_started;
+    int num_threads_completed;
+    pthread_mutex_t completed_mutex;
+    client_workers workers;
 } client;
 
 /**
@@ -36,14 +59,6 @@ typedef struct __client_node {
     struct __client_node *next;
     struct __client_node *prev;
 } client_list;
-
-/**
- * Client background thread arguments.
- */
-typedef struct __client_thread_arg {
-    gtipc_request req;
-    client *client;
-} client_thread_arg;
 
 /* Client register functions */
 int register_client(gtipc_registry *reg);
@@ -60,6 +75,6 @@ void exit_server();
 /* Server API functions */
 void add(gtipc_arg *arg);
 void mul(gtipc_arg *arg);
-void *compute_service(void *data);
+void compute_service(gtipc_request *req, client *client);
 
 #endif

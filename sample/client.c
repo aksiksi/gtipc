@@ -4,6 +4,10 @@
 
 #include "gtipc/api.h"
 
+void map_func(gtipc_request_key key, gtipc_arg *arg) {
+    printf("Request #%d completed: %d * %d = %d\n", key, arg->x, arg->y, arg->res);
+}
+
 int main() {
     gtipc_arg arg;
 
@@ -11,20 +15,23 @@ int main() {
 
     gtipc_init();
 
-    // Perform 1024 async requests
-    gtipc_arg async_args[2048];
-    gtipc_request_key keys[2048];
+    int num_async = 16;
+    int num_sync = 10;
 
-    for (i = 0; i < 2048; i++) {
+    // Perform 1024 async requests
+    gtipc_arg async_args[num_async];
+    gtipc_request_key keys[num_async];
+
+    for (i = 0; i < num_async; i++) {
         async_args[i].x = i * 20;
         async_args[i].y = i * 22;
         err = gtipc_async(&async_args[i], GTIPC_MUL, &keys[i]);
     }
 
     // Now perform 10 sync requests
-    gtipc_arg sync_args[10];
+    gtipc_arg sync_args[num_sync];
 
-    for (i = 0; i < 10; i++) {
+    for (i = 0; i < num_sync; i++) {
         sync_args[i].x = i * 10;
         sync_args[i].y = i * 12;
 
@@ -34,11 +41,9 @@ int main() {
                sync_args[i].x, sync_args[i].y, sync_args[i].res);
     }
 
-    // Sleep for a bit
-    sleep(2);
-
     // Now get all async requests
-    gtipc_async_join(keys, async_args, 2048);
+    gtipc_async_join(keys, async_args, num_async);
+
 //    for (i = 0; i < 2048; i++) {
 //        gtipc_async_wait(keys[i], &async_args[i]);
 //        printf("Async %d: %d * %d = %d\n", i,
