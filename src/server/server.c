@@ -21,62 +21,6 @@ static int STOP_REGISTRY = 0; // Flag to stop registry thread
 // Doubly linked list of registered clients
 client_list *clients = NULL;
 
-void enqueue_req(gtipc_request *req, client *client) {
-    client_workers *workers = &client->workers;
-
-    pthread_mutex_lock(&workers->mutex);
-
-    request_queue *head = workers->queue;
-
-    request_queue *entry = malloc(sizeof(request_queue));
-    entry->data = *req;
-    entry->next = NULL;
-    entry->tail = entry;
-
-    if (head == NULL) {
-        // Initialize the queue
-        head = entry;
-    }
-    else {
-        // Get tail of list
-        request_queue *tail = head->tail;
-
-        // Insert new node after tail
-        // Set old tail's next to new node
-        tail->next = entry;
-
-        // Update global tail
-        head->tail = entry;
-    }
-
-    pthread_mutex_unlock(&workers->mutex);
-
-    // Alert worker threads that new work is on the queue
-    pthread_cond_signal(&workers->cond);
-}
-
-void dequeue_req(client *client, gtipc_request *req) {
-    client_workers *workers = &client->workers;
-
-    pthread_mutex_lock(&workers->mutex);
-
-    request_queue *head = workers->queue;
-
-    // Wait for new arg enqueue
-    while (head == NULL)
-        pthread_cond_wait(&workers->cond, &workers->mutex);
-
-    request_queue *entry = head;
-
-    *req = entry->data;
-    head = entry->next;
-    head->tail = entry->tail;
-
-    free(entry);
-
-    pthread_mutex_unlock(&workers->mutex);
-}
-
 void exit_error(char *msg) {
     fprintf(stderr, "%s", msg);
     exit(EXIT_FAILURE);
@@ -103,20 +47,47 @@ void request_complete(gtipc_shared_entry *entry, gtipc_arg *arg) {
 }
 
 void *service_worker(void *data) {
-    gtipc_request req;
-    client *client = (client *)data;
+    client *client = data;
 
-    while (1) {
-        // Get a request
-        dequeue_req(client, &req);
+    // Buffer for incoming gtipc_request
+    char buf[sizeof(gtipc_request)];
+    gtipc_request *req;
 
-        // Perform the requested service and write result
-        compute_service(&req, client);
+    // Timeout parameter for message queue operations
+    struct timespec ts;
 
-        // Increment number of threads completed
-        pthread_mutex_lock(&client->completed_mutex);
-        client->num_threads_completed++;
-        pthread_mutex_unlock(&client->completed_mutex);
+    while (!client->stop_client_threads) {
+        // Setup a 10 ms timeout
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 10000000;
+        ts.tv_sec = 0;
+
+        // Wait for service request from client on receive queue
+        ssize_t received = mq_timedreceive(client->recv_queue, buf, sizeof(gtipc_request), NULL, &ts);
+
+        // If receive error, ignore the request
+        if (received != -1) {
+            // Extract request and argument
+            req = (gtipc_request *)buf;
+
+            if (req->request_id == -1) {
+                // Resize request received from client
+                resize_shm_object(client);
+            }
+
+            else {
+                pthread_mutex_lock(&client->started_mutex);
+                client->num_threads_started++;
+                pthread_mutex_unlock(&client->started_mutex);
+
+                compute_service(req, client);
+
+                // Increment number of threads completed
+                pthread_mutex_lock(&client->completed_mutex);
+                client->num_threads_completed++;
+                pthread_mutex_unlock(&client->completed_mutex);
+            }
+        }
     }
 }
 
@@ -142,78 +113,29 @@ void compute_service(gtipc_request *req, client *client) {
     printf("Client %d, request %d: done = 1\n", client->pid, req->request_id);
 }
 
-void init_service_threads(client *client) {
-    client_workers *workers = &client->workers;
-
-    // Init service threads
-    workers->mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    workers->cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
-    workers->queue = NULL;
+void init_worker_threads(client *client) {
+    client->stop_client_threads = 0;
+    client->num_threads_started = 0;
+    client->num_threads_completed = 0;
+    client->completed_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    client->started_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
 
     int i;
 
-    // Spawn the worker threads; they will wait for requests on the client request queue
+    // Spawn the worker threads; they will wait for requests on the client request message queue
     for (i = 0; i < NUM_THREADS; i++)
-        pthread_create(&workers->threads[i], NULL, service_worker, (void *)client);
+        pthread_create(&client->workers[i], NULL, service_worker, (void *)client);
 }
 
-void cleanup_service_threads(client *client) {
-    client_workers *workers = &client->workers;
-
-    pthread_mutex_destroy(&workers->mutex);
-    pthread_cond_destroy(&workers->cond);
+void cleanup_worker_threads(client *client) {
+    pthread_mutex_destroy(&client->completed_mutex);
+    pthread_mutex_destroy(&client->started_mutex);
 
     int i;
 
     // Cancel worker threads for current client
     for (i = 0; i < NUM_THREADS; i++)
-        pthread_cancel(workers->threads[i]);
-}
-
-/**
- * Client thread handler. Each client gets its own thread for queue management.
- */
-static void *client_handler(void *node) {
-    // Get current thread's client object, as passed in
-    client *client = &((client_list *)node)->client;
-
-    // Buffer for incoming gtipc_request
-    char buf[sizeof(gtipc_request)];
-    gtipc_request *req;
-
-    // Timeout parameter for message queue operations
-    struct timespec ts;
-
-    init_service_threads(client);
-
-    while (!client->stop_client_thread) {
-        // Setup a 10 ms timeout
-        clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 10000000;
-        ts.tv_sec = 0;
-
-        // Wait for service request from client on receive queue
-        ssize_t received = mq_timedreceive(client->recv_queue, buf, sizeof(gtipc_request), NULL, &ts);
-
-        // If receive error, ignore the request (TODO: Is this sound behavior?)
-        if (received != -1) {
-            // Extract request and argument
-            req = (gtipc_request *)buf;
-
-            if (req->request_id == -1) {
-                // Resize request received from client
-                resize_shm_object(client);
-            }
-
-            else {
-                // Push the request to the client's worker queue
-                enqueue_req(req, client);
-                client->num_threads_started++;
-            }
-        }
-    }
-
-    cleanup_service_threads(client);
+        pthread_cancel(client->workers[i]);
 }
 
 /* Registry thread handler. */
@@ -364,14 +286,8 @@ void resize_shm_object(client *client) {
     // Map new shared memory segment
     char *new_shm_addr = mmap(NULL, new_shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
-    client_workers *workers = &client->workers;
-    pthread_mutex_lock(&workers->mutex);
-
-    // Wait for arg queue to become empty AND for all started threads to complete
-    while (workers->queue != NULL && (client->num_threads_completed != client->num_threads_started))
-        pthread_cond_wait(&workers->cond, &workers->mutex);
-
-    pthread_mutex_unlock(&workers->mutex);
+    // Wait for all started threads to complete
+    while (client->num_threads_completed != client->num_threads_started);
 
     // Copy over old shared segment to new segment
     memcpy(new_shm_addr, client->shm_addr, client->shm_size);
@@ -416,12 +332,10 @@ int register_client(gtipc_registry *reg) {
     node->client = client;
     append_client(node);
 
-    // Spin up client's background handler thread
-    node->client.stop_client_thread = 0;
-    node->client.num_threads_started = 0;
-    node->client.num_threads_completed = 0;
-    node->client.completed_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    pthread_create(&node->client.client_thread, NULL, client_handler, (void *)node);
+    // Init worker thread state
+    init_worker_threads(&node->client);
+
+    // Spin up
 
     #if DEBUG
         printf("Client %d has queues %d and %d\n", clients->client.pid, clients->client.send_queue, clients->client.recv_queue);
@@ -463,15 +377,11 @@ int unregister_client(int pid, int close) {
     // Unmap memory
     munmap(client->shm_addr, client->shm_size);
 
-    // Stop client handler thread and wait for it to terminate
-    client->stop_client_thread = 1;
-    pthread_join(client->client_thread, NULL);
-
-    // Wait for all detached threads to complete
+    // Wait for all threads to complete
     while (client->num_threads_started != client->num_threads_completed);
 
-    // Destroy client thread mutex
-    pthread_mutex_destroy(&client->completed_mutex);
+    // Cleanup thread state
+    cleanup_worker_threads(client);
 
     free(node);
 

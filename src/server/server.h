@@ -16,12 +16,6 @@ typedef struct __request_queue {
 
 // Worker thread management for a single client
 #define NUM_THREADS 10
-typedef struct __client_workers {
-    request_queue *queue;
-    pthread_mutex_t mutex;
-    pthread_cond_t cond;
-    pthread_t threads[NUM_THREADS];
-} client_workers;
 
 /**
  * Describes a single client as seen by the server.
@@ -41,13 +35,13 @@ typedef struct __client {
     size_t shm_size;
     char shm_name[100];
 
-    // Reference to client's thread handler
-    pthread_t client_thread;
-    int stop_client_thread;
+    // Client worker threads
+    int stop_client_threads;
     int num_threads_started;
     int num_threads_completed;
+    pthread_mutex_t started_mutex;
     pthread_mutex_t completed_mutex;
-    client_workers workers;
+    pthread_t workers[NUM_THREADS];
 } client;
 
 /**
