@@ -26,6 +26,10 @@ void exit_error(char *msg) {
     exit(EXIT_FAILURE);
 }
 
+/**
+ * Multiply two numbers, copy result to shared memory, then busy loop
+ * @param arg
+ */
 void mul_service(gtipc_mul_arg *arg) {
     // Long running multiply
     int i;
@@ -33,16 +37,32 @@ void mul_service(gtipc_mul_arg *arg) {
         arg->res = arg->x * arg->y;
 }
 
+/**
+ * Generate four pseudo-random numbers and copy them to shared memory
+ * @param arg
+ */
 void rand_service(gtipc_rand_arg *arg) {
-    // TODO
-    arg->res[0] = 0x10;
-    arg->res[1] = 0x20;
-    arg->res[2] = 0x30;
-    arg->res[3] = 0x40;
+    arg->res[0] = rand();
+    arg->res[1] = rand();
+    arg->res[2] = rand();
+    arg->res[3] = rand();
 }
 
-void file_service(gtipc_file_arg *arg) {
-    // TODO
+/**
+ * Create/append to a file at given path
+ * @param arg
+ */
+int file_service(gtipc_file_arg *arg) {
+    FILE *fp;
+
+    if ((fp = fopen(arg->path, "a")) == NULL)
+        return -1;
+
+    fprintf(fp, "Hello from service %d!\n", getpid());
+
+    fclose(fp);
+
+    return 0;
 }
 
 /**
@@ -112,7 +132,8 @@ void handle_request(gtipc_request *req, client *client) {
             rand_service(&arg->rand);
             break;
         case GTIPC_FILE:
-            file_service(&arg->file);
+            if (file_service(&arg->file))
+                fprintf(stderr, "ERROR: Could not open (%s) for client %d!\n", arg->file.path, client->pid);
             break;
         default:
             fprintf(stderr, "ERROR: Invalid service requested by client %d\n", req->pid);
@@ -449,6 +470,9 @@ void init_server() {
     if (pthread_create(&registry_thread, NULL, registry_handler, NULL)) {
         exit_error("FATAL: Failed to create registry background thread!\n");
     }
+
+    // Time-based seed
+    srand(time((NULL)));
 }
 
 int main(int argc, char **argv) {

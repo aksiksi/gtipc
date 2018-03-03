@@ -11,13 +11,20 @@
 #include "gtipc/params.h"
 
 /* Global state */
-// Global registry
+// Global registry queue
 mqd_t global_registry;
 gtipc_registry registry_entry;
 
 // Current request ID
 volatile int global_request_id = 0;
 pthread_spinlock_t global_request_lock;
+
+// Mutex to sync multiple threads during request key search
+pthread_mutex_t global_request_key_mutex;
+
+// Server-initiated shutdown thread and flag
+pthread_t shutdown_thread;
+volatile int shutdown = 0;
 
 // Message queues and shared memory for current client
 struct __client {
@@ -115,8 +122,6 @@ void *rq_worker(void *unused) {
             if (mq_send(client.send_queue, (char *)&req, sizeof(gtipc_request), req.prio)) {
                 fprintf(stderr, "ERROR: Failed to send async request to server (errno: %d)\n", errno);
             }
-
-            printf("Sent request #%d with prio = %d\n", req.request_id, req.prio);
         }
     }
 
@@ -157,6 +162,11 @@ void async_rq_destroy() {
     pthread_cond_destroy(&rqp.cond);
 }
 
+
+void *shutdown_handler(void *unused) {
+
+}
+
 /* Create all required message queues */
 int create_queues() {
     // Derive names for send and recv queues based on current PID
@@ -186,7 +196,7 @@ int create_queues() {
 
     if (client.send_queue == (mqd_t)-1 || client.recv_queue == (mqd_t)-1) {
         fprintf(stderr, "FATAL: mq_open() failed in create_queues()\n");
-        return GTIPC_FATAL_ERROR;
+        return GTIPC_CREATEQ_ERROR;
     }
 
     return 0;
@@ -238,6 +248,7 @@ int create_shm_object() {
     int i;
     gtipc_shared_entry se;
     se.used = 0;
+    se.done = 0;
 
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -294,6 +305,8 @@ int gtipc_init() {
     // Create client queues and check for errors
     err = create_queues(); if (err) return err;
 
+    // Spawn shutdown handler thread
+
     // Create shm object
     err = create_shm_object(); if (err) return err;
 
@@ -321,6 +334,8 @@ int gtipc_init() {
     global_request_id = 0;
     pthread_spin_init(&global_request_lock, PTHREAD_PROCESS_PRIVATE);
 
+    global_request_key_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+
     // Init async request queue
     async_rq_init();
 
@@ -346,6 +361,8 @@ int gtipc_exit() {
 
     // Free up global spinlock
     pthread_spin_destroy(&global_request_lock);
+
+    pthread_mutex_destroy(&global_request_key_mutex);
 
     return 0;
 }
@@ -379,6 +396,7 @@ int resize_shm_object() {
     int i;
     gtipc_shared_entry se;
     se.used = 0;
+    se.done = 0;
 
     pthread_mutexattr_t attr;
     pthread_mutexattr_init(&attr);
@@ -455,7 +473,10 @@ int find_shm_entry(gtipc_arg *arg) {
 
         if (!entry->used) {
             // Unused entry found
-            entry->arg = *arg;
+            // Copy arg only if needed
+            if (arg != NULL)
+                entry->arg = *arg;
+
             entry->used = 1;
             entry->done = 0;
 
@@ -494,7 +515,10 @@ int prepare_request(gtipc_arg *arg, gtipc_service service, gtipc_request_prio pr
     pthread_spin_unlock(&global_request_lock);
 
     // Find a suitable shared mem entry and store arg there
+    // Synchronized to allow multiple client threads to rely on shared mem
+    pthread_mutex_lock(&global_request_key_mutex);
     req->entry_idx = find_shm_entry(arg);
+    pthread_mutex_unlock(&global_request_key_mutex);
 
     return 0;
 }
@@ -515,7 +539,13 @@ int is_done(gtipc_request_key key, gtipc_arg *arg) {
     if (entry->done == 1) {
         // Mark as unused
         entry->used = 0;
-        *arg = entry->arg;
+
+        if (arg != NULL)
+            *arg = entry->arg;
+
+        // Not done anymore ;)
+        entry->done = 0;
+
         done = 1;
     }
 
@@ -554,11 +584,13 @@ int recv_response(gtipc_request_key key, gtipc_arg *arg) {
 /**
  * Synchronous API IPC service call.
  *
- * @param arg Argument to the service.
+ * @param arg Input argument to the service; set to NULL if service takes no args
  * @param service Type of service required.
+ * @param prio Priority
+ * @param out Output argument returned by the service
  * @return 0 if no error
  */
-int gtipc_sync(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio) {
+int gtipc_sync(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio, gtipc_arg *out) {
     int err;
 
     // Create an IPC request object
@@ -570,7 +602,7 @@ int gtipc_sync(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio) {
 
     // Wait for correct response
     int key = req.entry_idx;
-    err = recv_response(key, arg); if (err) return err;
+    err = recv_response(key, out); if (err) return err;
 
     return 0;
 }
@@ -578,7 +610,7 @@ int gtipc_sync(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio) {
 /**
  * Asynchronous API IPC service call.
  *
- * @param arg Argument to the service.
+ * @param arg Argument to the service; set to NULL if service takes no args
  * @param service Type of service required.
  * @param key Output: unique key for current request.
  * @return 0 if no error
@@ -587,7 +619,6 @@ int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio, 
     // Create a request and store key
     gtipc_request req;
     int err = prepare_request(arg, service, prio, &req); if (err) return err;
-
     *key = req.entry_idx;
 
     // Enqueue request for later send to remote IPC server

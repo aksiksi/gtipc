@@ -65,7 +65,7 @@ void exit_server();
 /* Server API functions */
 void mul_service(gtipc_mul_arg *arg);
 void rand_service(gtipc_rand_arg *arg);
-void file_service(gtipc_file_arg *arg);
+int file_service(gtipc_file_arg *arg); // Return error if file error
 void handle_request(gtipc_request *req, client *client);
 
 #endif

@@ -6,10 +6,11 @@
 /* API error codes */
 static int GTIPC_INIT_ERROR = 1;
 static int GTIPC_FATAL_ERROR = 2;
-static int GTIPC_RECV_ERROR = 3;
-static int GTIPC_SEND_ERROR = 4;
+static int GTIPC_RECVQ_ERROR = 3;
+static int GTIPC_SENDQ_ERROR = 4;
 static int GTIPC_SHM_ERROR = 5;
 static int GTIPC_PRIO_ERROR = 6;
+static int GTIPC_CREATEQ_ERROR = 7;
 
 /* API initialization and exit */
 extern int gtipc_init();
@@ -20,12 +21,13 @@ extern int gtipc_exit();
 /**
  * Synchronous API IPC service call.
  *
- * @param arg Argument to the service.
+ * @param arg Input argument to the service; set to NULL if service takes no args
  * @param service Type of service required.
  * @param prio Priority of this request; between 0 (lowest) and 31 (highest)
+ * @param out Output argument returned by the service
  * @return 0 if no error
  */
-extern int gtipc_sync(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio);
+extern int gtipc_sync(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio, gtipc_arg *out);
 
 /* Asynchronous API */
 
