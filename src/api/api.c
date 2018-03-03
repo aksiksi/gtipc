@@ -3,9 +3,6 @@
 #include <pthread.h>
 #include <mqueue.h>
 #include <sys/mman.h>
-#include <sys/stat.h>
-#include <sys/types.h>
-#include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
 
@@ -36,6 +33,129 @@ struct __client {
     int shm_fd;
     size_t shm_size;
 } client;
+
+/**
+ * Request queue for aysnc API requests.
+ *
+ * Functions as a priority queue, where head has highest prio and tail has lowest.
+ */
+typedef struct __request_queue {
+    gtipc_request data;
+    struct __request_queue *next;
+} request_queue;
+
+struct __request_queue_params {
+    pthread_t thread;
+    int stop_thread;
+    pthread_mutex_t mutex;
+    pthread_cond_t cond;
+    request_queue *queue;
+} rqp;
+
+void rq_enqueue(gtipc_request *req) {
+    request_queue *entry = malloc(sizeof(request_queue));
+    entry->data = *req;
+    entry->next = NULL;
+
+    pthread_mutex_lock(&rqp.mutex);
+
+    request_queue *prev = NULL;
+    request_queue *curr = rqp.queue;
+
+    // Find first node whose successor has a *lower* priority
+    while (curr != NULL && curr->data.prio >= req->prio) {
+        prev = curr;
+        curr = curr->next;
+    }
+
+    if (prev == NULL) {
+        // Insert at head of queue
+        entry->next = curr;
+        rqp.queue = entry;
+    } else {
+        // Insert somewhere after head
+        entry->next = curr;
+        prev->next = entry;
+    }
+
+    pthread_mutex_unlock(&rqp.mutex);
+}
+
+int rq_deque(gtipc_request *req) {
+    pthread_mutex_lock(&rqp.mutex);
+
+    // Get head of queue (highest priority)
+    request_queue *entry = rqp.queue;
+
+    if (entry == NULL) {
+        // Queue is empty
+        pthread_mutex_unlock(&rqp.mutex);
+        return -1;
+    }
+
+    *req = entry->data;
+
+    // Point queue to next entry
+    rqp.queue = entry->next;
+
+    pthread_mutex_unlock(&rqp.mutex);
+
+    free(entry);
+
+    return 0;
+}
+
+void *rq_worker(void *unused) {
+    gtipc_request req;
+
+    while (!rqp.stop_thread) {
+        // Get highest prio async request
+        if (!rq_deque(&req)) {
+            // Got one: send this request to server with given priority
+            if (mq_send(client.send_queue, (char *)&req, sizeof(gtipc_request), req.prio)) {
+                fprintf(stderr, "ERROR: Failed to send async request to server (errno: %d)\n", errno);
+            }
+
+            printf("Sent request #%d with prio = %d\n", req.request_id, req.prio);
+        }
+    }
+
+    return NULL;
+}
+
+void async_rq_init() {
+    rqp.mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    rqp.cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
+    rqp.queue = NULL;
+
+    // Create request queue worker thread
+    pthread_create(&rqp.thread, NULL, rq_worker, NULL);
+    rqp.stop_thread = 0;
+}
+
+void async_rq_destroy() {
+    pthread_mutex_lock(&rqp.mutex);
+
+    // Cleanup the request queue
+    request_queue *head = rqp.queue;
+    request_queue *next = NULL;
+
+    while (head != NULL) {
+        next = head->next;
+        free(head);
+        head = next;
+    }
+
+    pthread_mutex_unlock(&rqp.mutex);
+
+    // Cancel request queue worker thread
+    rqp.stop_thread = 1;
+    pthread_join(rqp.thread, NULL);
+
+    // Destroy mutex and cond
+    pthread_mutex_destroy(&rqp.mutex);
+    pthread_cond_destroy(&rqp.cond);
+}
 
 /* Create all required message queues */
 int create_queues() {
@@ -201,6 +321,9 @@ int gtipc_init() {
     global_request_id = 0;
     pthread_spin_init(&global_request_lock, PTHREAD_PROCESS_PRIVATE);
 
+    // Init async request queue
+    async_rq_init();
+
     return 0;
 }
 
@@ -211,6 +334,9 @@ int gtipc_exit() {
         fprintf(stderr, "FATAL: Unregister message send failure in gtipc_exit()\n");
         return GTIPC_FATAL_ERROR;
     }
+
+    // Destroy async request queue
+    async_rq_destroy();
 
     // Cleanup queues
     destroy_queues();
@@ -347,36 +473,28 @@ int find_shm_entry(gtipc_arg *arg) {
 }
 
 /**
- * Send IPC request to server and return ID.
- *
- * Request is sent over shared message queue.
- *
- * @return 0 if no error, or GTIPC_SEND_ERROR
+ * Create a GTIPC request and return it via passed in pointer.
+ * @param arg
+ * @param service
+ * @param prio
+ * @param key
+ * @return
  */
-int send_request(gtipc_arg *arg, gtipc_service service, unsigned int priority, gtipc_request_key *key) {
-    // Create an IPC request object
-    gtipc_request req;
-    req.service = service;
-    req.arg = *arg;
-    req.pid = getpid();
+int prepare_request(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio, gtipc_request *req) {
+    if (prio < 0 || prio > 31)
+        return GTIPC_PRIO_ERROR;
 
-    // Atomically increment global request ID
+    req->service = service;
+    req->pid = getpid();
+    req->prio = prio;
+
+    // Atomically set and increment global request ID
     pthread_spin_lock(&global_request_lock);
-    req.request_id = global_request_id++;
+    req->request_id = global_request_id++;
     pthread_spin_unlock(&global_request_lock);
 
     // Find a suitable shared mem entry and store arg there
-    req.entry_idx = find_shm_entry(arg);
-
-    // Send request to server (blocks if queue full)
-    // TODO: fix this for the case of async request
-    if (mq_send(client.send_queue, (char *)&req, sizeof(gtipc_request), priority)) {
-        fprintf(stderr, "ERROR: Failed to send request to server\n");
-        return GTIPC_SEND_ERROR;
-    }
-
-    // Key is the index of entry in shared memory
-    *key = req.entry_idx;
+    req->entry_idx = find_shm_entry(arg);
 
     return 0;
 }
@@ -414,10 +532,6 @@ int is_done(gtipc_request_key key, gtipc_arg *arg) {
  * @return
  */
 int recv_response(gtipc_request_key key, gtipc_arg *arg) {
-    // Retrieve pointer to relevant entry
-    char *target = client.shm_addr + key * sizeof(gtipc_shared_entry);
-    gtipc_shared_entry *entry = (gtipc_shared_entry *)target;
-
     // 0.1 ms backoff
     unsigned int backoff = 100;
 
@@ -444,15 +558,19 @@ int recv_response(gtipc_request_key key, gtipc_arg *arg) {
  * @param service Type of service required.
  * @return 0 if no error
  */
-int gtipc_sync(gtipc_arg *arg, gtipc_service service) {
+int gtipc_sync(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio) {
     int err;
 
-    // Send request to remote IPC server
-    int request_id;
-    err = send_request(arg, service, 10, &request_id); if (err) return err;
+    // Create an IPC request object
+    gtipc_request req;
+    err = prepare_request(arg, service, prio, &req); if (err) return err;
+
+    // Enqueue the request
+    rq_enqueue(&req);
 
     // Wait for correct response
-    err = recv_response(request_id, arg); if (err) return err;
+    int key = req.entry_idx;
+    err = recv_response(key, arg); if (err) return err;
 
     return 0;
 }
@@ -462,12 +580,20 @@ int gtipc_sync(gtipc_arg *arg, gtipc_service service) {
  *
  * @param arg Argument to the service.
  * @param service Type of service required.
- * @param key Unique key for current request.
+ * @param key Output: unique key for current request.
  * @return 0 if no error
  */
-int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_key *key) {
-    // Send request to remote IPC server
-    return send_request(arg, service, 1, key);
+int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio, gtipc_request_key *key) {
+    // Create a request and store key
+    gtipc_request req;
+    int err = prepare_request(arg, service, prio, &req); if (err) return err;
+
+    *key = req.entry_idx;
+
+    // Enqueue request for later send to remote IPC server
+    rq_enqueue(&req);
+
+    return 0;
 }
 
 /**
@@ -478,8 +604,9 @@ int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_key *key) {
  * @return 0 if no error
  */
 int gtipc_async_wait(gtipc_request_key key, gtipc_arg *arg) {
-    // Wait for correct response
-    return recv_response(key, arg);
+    // Wait for correct response to complete
+    while (!is_done(key, arg));
+    return 0;
 }
 
 /**
@@ -514,6 +641,8 @@ int gtipc_async_map(gtipc_request_key *keys, int size, void (*fn)(gtipc_request_
 
         i = (i + 1) % size;
     }
+
+    free(key_done);
 
     return 0;
 }

@@ -1,36 +1,29 @@
 #include <stdio.h>
-#include <unistd.h>
 #include <gtipc/messages.h>
-#include <sys/time.h>
 
 #include "gtipc/api.h"
 
-void map_func(gtipc_request_key key, gtipc_arg *arg) {
-    printf("Request #%d completed: %d * %d = %d\n", key, arg->x, arg->y, arg->res);
-}
-
 int main() {
-    gtipc_arg arg;
-
     int err, i;
 
     gtipc_init();
 
-    int num_async = 1024;
-    int num_sync = 10;
+    int num_async = 512;
+    int num_sync = 75;
 
-    // Perform 1024 async requests
+    // Perform async requests
     gtipc_arg async_args[num_async];
     gtipc_request_key keys[num_async];
+    gtipc_request_prio priority = 1;
 
     struct timespec ts1, ts2, diff;
     long diff_usec;
     clock_gettime(CLOCK_REALTIME, &ts1);
 
-    for (i = 0; i < num_async; i++) {
-        async_args[i].x = i * 20;
-        async_args[i].y = i * 22;
-        err = gtipc_async(&async_args[i], GTIPC_MUL, &keys[i]);
+    for (i = 0; i < (num_async / 2); i++) {
+        async_args[i].mul.x = i * 20;
+        async_args[i].mul.y = i * 22;
+        err = gtipc_async(&async_args[i], GTIPC_MUL, priority, &keys[i]);
     }
 
     clock_gettime(CLOCK_REALTIME, &ts2);
@@ -40,17 +33,22 @@ int main() {
 
     printf("Time to perform %d async requests: %ld usecs\n", num_async, diff_usec);
 
-    // Now perform 10 sync requests
+    // Now perform sync rand requests
     gtipc_arg sync_args[num_sync];
+    priority = 10;
 
     for (i = 0; i < num_sync; i++) {
-        sync_args[i].x = i * 10;
-        sync_args[i].y = i * 12;
+        err = gtipc_sync(&sync_args[i], GTIPC_RAND, priority);
 
-        err = gtipc_sync(&sync_args[i], GTIPC_ADD);
+        printf("Sync %d: rand bytes = %d, %d, %d, %d\n", i,
+               sync_args[i].rand.res[0], sync_args[i].rand.res[1], sync_args[i].rand.res[2], sync_args[i].rand.res[3]);
+    }
 
-        printf("Sync %d: %d + %d = %d\n", i,
-               sync_args[i].x, sync_args[i].y, sync_args[i].res);
+    // Now more async
+    for (i = num_async / 2; i < num_async; i++) {
+        async_args[i].mul.x = i * 20;
+        async_args[i].mul.y = i * 22;
+        err = gtipc_async(&async_args[i], GTIPC_MUL, priority, &keys[i]);
     }
 
     // Now get all async requests

@@ -9,6 +9,7 @@ static int GTIPC_FATAL_ERROR = 2;
 static int GTIPC_RECV_ERROR = 3;
 static int GTIPC_SEND_ERROR = 4;
 static int GTIPC_SHM_ERROR = 5;
+static int GTIPC_PRIO_ERROR = 6;
 
 /* API initialization and exit */
 extern int gtipc_init();
@@ -21,9 +22,10 @@ extern int gtipc_exit();
  *
  * @param arg Argument to the service.
  * @param service Type of service required.
+ * @param prio Priority of this request; between 0 (lowest) and 31 (highest)
  * @return 0 if no error
  */
-extern int gtipc_sync(gtipc_arg *arg, gtipc_service service);
+extern int gtipc_sync(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio);
 
 /* Asynchronous API */
 
@@ -32,10 +34,11 @@ extern int gtipc_sync(gtipc_arg *arg, gtipc_service service);
  *
  * @param arg Argument to the service.
  * @param service Type of service required.
+ * @param prio Priority of this request; 0 (lowest) and 31 (highest)
  * @param id Return: unique identifier for current request.
  * @return 0 if no error
  */
-extern int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_key *key);
+extern int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_prio prio, gtipc_request_key *key);
 
 /**
  * Wait for a single asynchronous request to complete.

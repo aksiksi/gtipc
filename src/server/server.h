@@ -6,7 +6,7 @@
 #include <pthread.h>
 
 // Worker thread management for a single client
-#define THREADS_PER_CLIENT 100
+#define THREADS_PER_CLIENT 50
 
 /**
  * Describes a single client as seen by the server.
@@ -63,8 +63,9 @@ void init_server();
 void exit_server();
 
 /* Server API functions */
-void add(gtipc_arg *arg);
-void mul(gtipc_arg *arg);
-void compute_service(gtipc_request *req, client *client);
+void mul_service(gtipc_mul_arg *arg);
+void rand_service(gtipc_rand_arg *arg);
+void file_service(gtipc_file_arg *arg);
+void handle_request(gtipc_request *req, client *client);
 
 #endif

@@ -26,32 +26,23 @@ void exit_error(char *msg) {
     exit(EXIT_FAILURE);
 }
 
-void add(gtipc_arg *arg) {
-    arg->res = arg->x + arg->y;
-}
-
-void mul(gtipc_arg *arg) {
+void mul_service(gtipc_mul_arg *arg) {
     // Long running multiply
-    arg->res = arg->x * arg->y;
-
     int i;
-    int sum = 0;
-
-    for (i = 0; i < arg->res; i++) {
-        sum += arg->x;
-    }
+    for (i = 0; i < 100000; i++)
+        arg->res = arg->x * arg->y;
 }
 
-/**
- * Mark a request as complete in shared memory
- * @param entry Pointer to completed entry
- */
-void request_complete(gtipc_shared_entry *entry, gtipc_arg *arg) {
-    pthread_mutex_t *mutex = &entry->mutex;
-    pthread_mutex_lock(mutex);
-    entry->done = 1;
-    entry->arg = *arg;
-    pthread_mutex_unlock(mutex);
+void rand_service(gtipc_rand_arg *arg) {
+    // TODO
+    arg->res[0] = 0x10;
+    arg->res[1] = 0x20;
+    arg->res[2] = 0x30;
+    arg->res[3] = 0x40;
+}
+
+void file_service(gtipc_file_arg *arg) {
+    // TODO
 }
 
 /**
@@ -66,6 +57,7 @@ void *service_worker(void *data) {
 
     // Buffer for incoming gtipc_request
     char buf[sizeof(gtipc_request)];
+    unsigned int prio;
     gtipc_request *req;
 
     // Timeout parameter for message queue operations
@@ -78,11 +70,11 @@ void *service_worker(void *data) {
         ts.tv_sec = 0;
 
         // Wait for service request from client on receive queue
-        ssize_t received = mq_timedreceive(client->recv_queue, buf, sizeof(gtipc_request), NULL, &ts);
+        ssize_t received = mq_timedreceive(client->recv_queue, buf, sizeof(gtipc_request), &prio, &ts);
 
         // If receive error, ignore the request
         if (received != -1) {
-            // Extract request and argument
+            // Extract request`
             req = (gtipc_request *)buf;
 
             if (req->request_id == -1) {
@@ -95,7 +87,8 @@ void *service_worker(void *data) {
                 client->num_threads_started++;
                 pthread_mutex_unlock(&client->started_mutex);
 
-                compute_service(req, client);
+                // Handle received request
+                handle_request(req, client);
 
                 // Increment number of threads completed
                 pthread_mutex_lock(&client->completed_mutex);
@@ -106,26 +99,32 @@ void *service_worker(void *data) {
     }
 }
 
-void compute_service(gtipc_request *req, client *client) {
-    gtipc_arg *arg = &req->arg;
+void handle_request(gtipc_request *req, client *client) {
     gtipc_shared_entry *entry = (gtipc_shared_entry *)(client->shm_addr + req->entry_idx * sizeof(gtipc_shared_entry));
+    gtipc_arg *arg = &entry->arg;
 
     // Perform computation based on requested service
     switch (req->service) {
-        case GTIPC_ADD:
-            add(arg);
-            break;
         case GTIPC_MUL:
-            mul(arg);
+            mul_service(&arg->mul);
+            break;
+        case GTIPC_RAND:
+            rand_service(&arg->rand);
+            break;
+        case GTIPC_FILE:
+            file_service(&arg->file);
             break;
         default:
             fprintf(stderr, "ERROR: Invalid service requested by client %d\n", req->pid);
     }
 
     // Mark entry in shared memory as DONE (i.e., request has been served)
-    request_complete(entry, arg);
+    pthread_mutex_t *mutex = &entry->mutex;
+    pthread_mutex_lock(mutex);
+    entry->done = 1;
+    pthread_mutex_unlock(mutex);
 
-    printf("Client %d, request %d: done = 1\n", client->pid, req->request_id);
+    printf("Client %d, request %d, %d: DONE\n", client->pid, req->request_id, req->service);
 }
 
 void init_worker_threads(client *client) {

@@ -26,7 +26,7 @@ typedef struct __gtipc_registry {
  */
 typedef struct __gtipc_request {
     gtipc_service service;    // Requested IPC service
-    gtipc_arg arg;            // Service argument
+    gtipc_request_prio prio;  // Request priority
     int request_id;           // ID for current request
     int entry_idx;            // Index in shared mem for request's gtipc_shared_entry
     int pid;                  // Client PID
