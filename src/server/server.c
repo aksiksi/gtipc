@@ -31,7 +31,15 @@ void add(gtipc_arg *arg) {
 }
 
 void mul(gtipc_arg *arg) {
+    // Long running multiply
     arg->res = arg->x * arg->y;
+
+    int i;
+    int sum = 0;
+
+    for (i = 0; i < arg->res; i++) {
+        sum += arg->x;
+    }
 }
 
 /**
@@ -46,6 +54,13 @@ void request_complete(gtipc_shared_entry *entry, gtipc_arg *arg) {
     pthread_mutex_unlock(mutex);
 }
 
+/**
+ * A single worker thread for a particular client.
+ * Waits for request to be available on client queue.
+ *
+ * @param data Pointer to client
+ * @return
+ */
 void *service_worker(void *data) {
     client *client = data;
 
@@ -57,9 +72,9 @@ void *service_worker(void *data) {
     struct timespec ts;
 
     while (!client->stop_client_threads) {
-        // Setup a 10 ms timeout
+        // Setup a 1 ms timeout
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 10000000;
+        ts.tv_nsec += 1000000;
         ts.tv_sec = 0;
 
         // Wait for service request from client on receive queue
@@ -123,7 +138,7 @@ void init_worker_threads(client *client) {
     int i;
 
     // Spawn the worker threads; they will wait for requests on the client request message queue
-    for (i = 0; i < NUM_THREADS; i++)
+    for (i = 0; i < THREADS_PER_CLIENT; i++)
         pthread_create(&client->workers[i], NULL, service_worker, (void *)client);
 }
 
@@ -134,7 +149,7 @@ void cleanup_worker_threads(client *client) {
     int i;
 
     // Cancel worker threads for current client
-    for (i = 0; i < NUM_THREADS; i++)
+    for (i = 0; i < THREADS_PER_CLIENT; i++)
         pthread_cancel(client->workers[i]);
 }
 
@@ -143,13 +158,14 @@ static void *registry_handler(void *unused) {
     char recv_buf[sizeof(gtipc_registry)];
     gtipc_registry *reg;
 
+
     // Timeout parameter for message queue operations
     struct timespec ts;
 
     while (!STOP_REGISTRY) {
-        // Setup a 10 ms timeout
+        // 100 ms receive timeout
         clock_gettime(CLOCK_REALTIME, &ts);
-        ts.tv_nsec += 10000000;
+        ts.tv_nsec += 100000000;
         ts.tv_sec = 0;
 
         // Wait for a new registry message from client
@@ -159,10 +175,8 @@ static void *registry_handler(void *unused) {
         // Read out registry entry
         reg = (gtipc_registry *)recv_buf;
 
-        #if DEBUG
         printf("CMD: %d, PID: %ld, Send queue: %s, Recv queue: %s\n", reg->cmd, (long)reg->pid,
                reg->send_queue_name, reg->recv_queue_name);
-        #endif
 
         // Register or unregister the client based on given command
         switch (reg->cmd) {
@@ -374,15 +388,16 @@ int unregister_client(int pid, int close) {
     mq_close(client->send_queue);
     mq_close(client->recv_queue);
 
-    // Unmap memory
-    munmap(client->shm_addr, client->shm_size);
-
     // Wait for all threads to complete
     while (client->num_threads_started != client->num_threads_completed);
 
-    // Cleanup thread state
+    // Cleanup client thread state
     cleanup_worker_threads(client);
 
+    // Unmap shared memory
+    munmap(client->shm_addr, client->shm_size);
+
+    // Free memory consumed by client
     free(node);
 
     return 0;

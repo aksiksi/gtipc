@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <gtipc/messages.h>
+#include <sys/time.h>
 
 #include "gtipc/api.h"
 
@@ -15,18 +16,29 @@ int main() {
 
     gtipc_init();
 
-    int num_async = 16;
+    int num_async = 1024;
     int num_sync = 10;
 
     // Perform 1024 async requests
     gtipc_arg async_args[num_async];
     gtipc_request_key keys[num_async];
 
+    struct timespec ts1, ts2, diff;
+    long diff_usec;
+    clock_gettime(CLOCK_REALTIME, &ts1);
+
     for (i = 0; i < num_async; i++) {
         async_args[i].x = i * 20;
         async_args[i].y = i * 22;
         err = gtipc_async(&async_args[i], GTIPC_MUL, &keys[i]);
     }
+
+    clock_gettime(CLOCK_REALTIME, &ts2);
+    diff.tv_sec = ts2.tv_sec - ts1.tv_sec;
+    diff.tv_nsec = ts2.tv_nsec - ts1.tv_nsec;
+    diff_usec = diff.tv_sec * 1000000 + (long)(diff.tv_nsec / 1000.0);
+
+    printf("Time to perform %d async requests: %ld usecs\n", num_async, diff_usec);
 
     // Now perform 10 sync requests
     gtipc_arg sync_args[num_sync];
@@ -49,6 +61,14 @@ int main() {
 //        printf("Async %d: %d * %d = %d\n", i,
 //               async_args[i].x, async_args[i].y, async_args[i].res);
 //    }
+
+    clock_gettime(CLOCK_REALTIME, &ts2);
+    diff.tv_sec = ts2.tv_sec - ts1.tv_sec;
+    diff.tv_nsec = ts2.tv_nsec - ts1.tv_nsec;
+    diff_usec = diff.tv_sec * 1000000 + (long)(diff.tv_nsec / 1000.0);
+
+    printf("Time to complete %d sync and %d async requests (in parallel): %ld usecs\n",
+           num_sync, num_async, diff_usec);
 
     gtipc_exit();
 

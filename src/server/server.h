@@ -5,17 +5,8 @@
 #include <mqueue.h>
 #include <pthread.h>
 
-/**
- * Queue for thread requests.
- */
-typedef struct __request_queue {
-    gtipc_request data;
-    struct __request_queue *tail;
-    struct __request_queue *next;
-} request_queue;
-
 // Worker thread management for a single client
-#define NUM_THREADS 10
+#define THREADS_PER_CLIENT 100
 
 /**
  * Describes a single client as seen by the server.
@@ -41,7 +32,7 @@ typedef struct __client {
     int num_threads_completed;
     pthread_mutex_t started_mutex;
     pthread_mutex_t completed_mutex;
-    pthread_t workers[NUM_THREADS];
+    pthread_t workers[THREADS_PER_CLIENT];
 } client;
 
 /**
@@ -57,6 +48,11 @@ typedef struct __client_node {
 /* Client register functions */
 int register_client(gtipc_registry *reg);
 int unregister_client(int pid, int close);
+
+/* Client list management */
+client_list *find_client(int pid);
+void remove_client(client_list *node);
+void append_client(client_list *node);
 
 /* POSIX IPC setup and cleanup */
 void open_shm_object(gtipc_registry *reg, client *client);

@@ -353,7 +353,7 @@ int find_shm_entry(gtipc_arg *arg) {
  *
  * @return 0 if no error, or GTIPC_SEND_ERROR
  */
-int send_request(gtipc_arg *arg, gtipc_service service, gtipc_request_key *key) {
+int send_request(gtipc_arg *arg, gtipc_service service, unsigned int priority, gtipc_request_key *key) {
     // Create an IPC request object
     gtipc_request req;
     req.service = service;
@@ -370,7 +370,7 @@ int send_request(gtipc_arg *arg, gtipc_service service, gtipc_request_key *key) 
 
     // Send request to server (blocks if queue full)
     // TODO: fix this for the case of async request
-    if (mq_send(client.send_queue, (char *)&req, sizeof(gtipc_request), 1)) {
+    if (mq_send(client.send_queue, (char *)&req, sizeof(gtipc_request), priority)) {
         fprintf(stderr, "ERROR: Failed to send request to server\n");
         return GTIPC_SEND_ERROR;
     }
@@ -417,7 +417,6 @@ int recv_response(gtipc_request_key key, gtipc_arg *arg) {
     // Retrieve pointer to relevant entry
     char *target = client.shm_addr + key * sizeof(gtipc_shared_entry);
     gtipc_shared_entry *entry = (gtipc_shared_entry *)target;
-    pthread_mutex_t *mutex = &entry->mutex;
 
     // 0.1 ms backoff
     unsigned int backoff = 100;
@@ -450,7 +449,7 @@ int gtipc_sync(gtipc_arg *arg, gtipc_service service) {
 
     // Send request to remote IPC server
     int request_id;
-    err = send_request(arg, service, &request_id); if (err) return err;
+    err = send_request(arg, service, 10, &request_id); if (err) return err;
 
     // Wait for correct response
     err = recv_response(request_id, arg); if (err) return err;
@@ -468,7 +467,7 @@ int gtipc_sync(gtipc_arg *arg, gtipc_service service) {
  */
 int gtipc_async(gtipc_arg *arg, gtipc_service service, gtipc_request_key *key) {
     // Send request to remote IPC server
-    return send_request(arg, service, key);
+    return send_request(arg, service, 1, key);
 }
 
 /**
