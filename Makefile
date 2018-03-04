@@ -11,24 +11,24 @@ LIBS := -lrt -lpthread
 # Executables and libraries
 CLIENT := $(BINDIR)/gtipc-client
 SERVER := $(BINDIR)/gtipc-server
-API := $(BINDIR)/libgtipc.a
+LIB := $(BINDIR)/libgtipc.a
 
-.PHONY: all api client server clean submission
+.PHONY: all lib client server clean submission
 
-all: api client server
+all: lib client server
 
 client: $(CLIENT)
 
 server: $(SERVER)
 
-api: $(API)
+lib: $(LIB)
 
 submission:
-	zip -r project2-aksiksi.zip Makefile CMakeLists.txt README.md include/ sample/ src/
+	zip -r project2-aksiksi.zip Makefile CMakeLists.txt README.md include/ sample/ src/ project2-report-aksiksi.pdf
 
 # gtipc API library target
-$(API): $(OBJDIR)/gtipc_api.o | $(BINDIR)
-	ar rcs $(API) $(OBJDIR)/gtipc_api.o
+$(LIB): $(OBJDIR)/gtipc_api.o | $(BINDIR)
+	ar rcs $(LIB) $(OBJDIR)/gtipc_api.o
 
 # gtipc client target
 $(CLIENT): $(OBJDIR)/client.o | $(BINDIR) # '|' means ignore the BINDIR when using $^
@@ -38,7 +38,7 @@ $(CLIENT): $(OBJDIR)/client.o | $(BINDIR) # '|' means ignore the BINDIR when usi
 $(SERVER): $(OBJDIR)/gtipc_server.o | $(BINDIR)
 	$(CC) $^ -o $@ $(LIBS)
 
-$(OBJDIR)/client.o: $(API) sample/client.c | $(OBJDIR)
+$(OBJDIR)/client.o: $(LIB) sample/client.c | $(OBJDIR)
 	$(CC) $(CCFLAGS) $(INCLUDES) sample/client.c -o $@
 
 $(OBJDIR)/gtipc_api.o: $(SRCDIR)/api/api.c $(INCDIR)/gtipc/api.h | $(OBJDIR)
