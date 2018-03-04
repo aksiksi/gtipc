@@ -40,11 +40,11 @@ void *test_thread(void *unused) {
     #endif
 
     // Read the file created by the file service
-    FILE *fp = fopen(file_arg->path, "r");
-    char line[100];
-    fscanf(fp, "%s\n", line);
-    printf("Read from %s: %s\n", file_arg->path, line);
-    fclose(fp);
+//    FILE *fp = fopen(file_arg->path, "r");
+//    char line[100];
+//    fscanf(fp, "%s\n", line);
+//    printf("Read from %s: %s\n", file_arg->path, line);
+//    fclose(fp);
 
     return NULL;
 }
@@ -54,8 +54,8 @@ int main() {
 
     gtipc_init();
 
-    int num_async = 10;
-    int num_sync = 2;
+    int num_async = 1024;
+    int num_sync = 16;
 
     // Perform half of the async requests
     gtipc_arg async_args[num_async];

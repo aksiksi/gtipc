@@ -6,12 +6,12 @@
 #include <pthread.h>
 
 // Worker thread management for a single client
-#define THREADS_PER_CLIENT 50
+#define THREADS_PER_CLIENT 10
 
 /**
  * Describes a single client as seen by the server.
  *
- * Note: **inverted** use of send and recv i.e. send is from server to client
+ * Note: **inverted** use of send and recv i.e. send is from server to client.
  */
 typedef struct __client {
     // Client PID
@@ -30,8 +30,8 @@ typedef struct __client {
     int stop_client_threads;
     int num_threads_started;
     int num_threads_completed;
-    pthread_mutex_t started_mutex;
-    pthread_mutex_t completed_mutex;
+    pthread_mutex_t threads_mutex;
+    pthread_cond_t threads_cond;
     pthread_t workers[THREADS_PER_CLIENT];
 } client;
 

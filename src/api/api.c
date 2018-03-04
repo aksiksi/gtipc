@@ -22,9 +22,8 @@ pthread_spinlock_t global_request_lock;
 // Mutex to sync multiple threads during request key search
 pthread_mutex_t global_request_key_mutex;
 
-// Server-initiated shutdown thread and flag
-pthread_t shutdown_thread;
-volatile int shutdown = 0;
+// Whether or not library initialized
+volatile int INIT = 0;
 
 // Message queues and shared memory for current client
 struct __client {
@@ -39,6 +38,7 @@ struct __client {
     char shm_name[100];
     int shm_fd;
     size_t shm_size;
+    pthread_mutex_t shm_resize_lock;
 } client;
 
 /**
@@ -114,6 +114,7 @@ int rq_deque(gtipc_request *req) {
 
 void *rq_worker(void *unused) {
     gtipc_request req;
+    struct mq_attr attr;
 
     while (!rqp.stop_thread) {
         // Get highest prio async request
@@ -160,11 +161,6 @@ void async_rq_destroy() {
     // Destroy mutex and cond
     pthread_mutex_destroy(&rqp.mutex);
     pthread_cond_destroy(&rqp.cond);
-}
-
-
-void *shutdown_handler(void *unused) {
-
 }
 
 /* Create all required message queues */
@@ -268,6 +264,9 @@ int create_shm_object() {
 
     pthread_mutexattr_destroy(&attr);
 
+    // Init resize lock
+    client.shm_resize_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+
     return 0;
 }
 
@@ -288,11 +287,17 @@ int destroy_shm_object() {
     // Unmap memory
     munmap(client.shm_addr, client.shm_size);
 
+    // Destory resize lock
+    pthread_mutex_destroy(&client.shm_resize_lock);
+
     return 0;
 }
 
 int gtipc_init() {
     int err;
+
+    if (INIT)
+        return GTIPC_FATAL_ERROR;
 
     // Obtain write-only reference to global registry message queue
     global_registry = mq_open(GTIPC_REGISTRY_QUEUE, O_RDWR);
@@ -305,9 +310,7 @@ int gtipc_init() {
     // Create client queues and check for errors
     err = create_queues(); if (err) return err;
 
-    // Spawn shutdown handler thread
-
-    // Create shm object
+    // Create shm object and resize lock
     err = create_shm_object(); if (err) return err;
 
     // Prepare registry entry for send
@@ -339,11 +342,15 @@ int gtipc_init() {
     // Init async request queue
     async_rq_init();
 
+    INIT = 1;
+
     return 0;
 }
 
 int gtipc_exit() {
-    // Send an unregister message to the server
+    if (!INIT)
+        return GTIPC_FATAL_ERROR;
+
     registry_entry.cmd = GTIPC_CLIENT_UNREGISTER;
     if (mq_send(global_registry, (const char *)&registry_entry, sizeof(gtipc_registry), 1)) {
         fprintf(stderr, "FATAL: Unregister message send failure in gtipc_exit()\n");
@@ -364,15 +371,28 @@ int gtipc_exit() {
 
     pthread_mutex_destroy(&global_request_key_mutex);
 
+    INIT = 0;
+
     return 0;
 }
 
 int resize_shm_object() {
     size_t new_shm_size = ((client.shm_size / sizeof(gtipc_shared_entry)) + GTIPC_SHM_SIZE) * sizeof(gtipc_shared_entry);
 
+    // Stop sending requests to the server!
+    rqp.stop_thread = 1;
+    pthread_join(rqp.thread, NULL);
+
+    #if DEBUG
+    printf("Resizing shared memory!\n");
+    #endif
+
     // Reached max size, so do not resize
     if (new_shm_size > GTIPC_SHM_MAX_SIZE)
         return 0;
+
+    // Acquire the resize lock
+    pthread_mutex_lock(&client.shm_resize_lock);
 
     // Open the shared mem object
     int fd;
@@ -385,36 +405,15 @@ int resize_shm_object() {
     // Resize the object
     ftruncate(fd, new_shm_size);
 
-    // Map the resized object and initialize it
+    // Map the resized object
     char *new_shm_addr = mmap(NULL, new_shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (new_shm_addr == MAP_FAILED) {
         fprintf(stderr, "FATAL: Failed to remap shared memory region (errno %d)\n", errno);
         return GTIPC_SHM_ERROR;
     }
 
-    // Initialize shared memory
-    int i;
-    gtipc_shared_entry se;
-    se.used = 0;
-    se.done = 0;
-
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-
-    for (i = 0; i < (new_shm_size / sizeof(gtipc_shared_entry)); i++) {
-        // Copy over entire object to newly created shared mem
-        memcpy(new_shm_addr + i*sizeof(gtipc_shared_entry), &se, sizeof(gtipc_shared_entry));
-
-        // Get handle to shared entry mutex
-        gtipc_shared_entry *entry = (gtipc_shared_entry *)(new_shm_addr + i*sizeof(gtipc_shared_entry));
-        pthread_mutex_t *mutex = &entry->mutex;
-
-        // Init the mutex as shared
-        pthread_mutex_init(mutex, &attr);
-    }
-
-    pthread_mutexattr_destroy(&attr);
+    // Synchronize shared memory with backing file so server can read it as-is
+//    msync(new_shm_addr + client.shm_size, client.shm_size, MS_SYNC);
 
     // Notify the server about the resize operation
     gtipc_request req;
@@ -427,7 +426,7 @@ int resize_shm_object() {
     mq_receive(client.recv_queue, (char *)buf, sizeof(gtipc_response), NULL);
     resp = (gtipc_response *)buf;
 
-    // Server is ready to rumble, resize done!
+    // Server is ready to rumble, resize and init done!
     if (resp->request_id == -1) {
         // Unmap memory old shared mem
         munmap(client.shm_addr, client.shm_size);
@@ -437,8 +436,20 @@ int resize_shm_object() {
         client.shm_size = new_shm_size;
         client.shm_fd = fd;
 
+        pthread_mutex_unlock(&client.shm_resize_lock);
+
+        // Start request queue thread once more
+        rqp.stop_thread = 0;
+        pthread_create(&rqp.thread, NULL, rq_worker, NULL);
+
+        #if DEBUG
+        printf("Done resizing shared memory!\n");
+        #endif
+
         return 0;
     }
+
+    pthread_mutex_unlock(&client.shm_resize_lock);
 
     return GTIPC_SHM_ERROR;
 }
@@ -527,10 +538,15 @@ int prepare_request(gtipc_arg *arg, gtipc_service service, gtipc_request_prio pr
  * Check if a given request is completed in shared mem.
  */
 int is_done(gtipc_request_key key, gtipc_arg *arg) {
+    // Make sure no shared mem resize is taking place
+    pthread_mutex_lock(&client.shm_resize_lock);
+
     // Retrieve pointer to relevant entry
     char *target = client.shm_addr + key * sizeof(gtipc_shared_entry);
     gtipc_shared_entry *entry = (gtipc_shared_entry *)target;
     pthread_mutex_t *mutex = &entry->mutex;
+
+    pthread_mutex_unlock(&client.shm_resize_lock);
 
     int done = 0;
 
@@ -692,14 +708,24 @@ int gtipc_async_join(gtipc_request_key *keys, gtipc_arg *args, int size) {
     int i = 0;
     int done = 0;
 
+    // Track which tasks are done
+    char *done_keys = malloc(sizeof(char) * size);
+    memset(done_keys, 0, (size_t)size); // Zero out done_keys array
+
     while (1) {
         if (done == size)
             break;
 
-        done += is_done(keys[i], args + i);
+        // Only check incomplete requests
+        if (!done_keys[i]) {
+            done_keys[i] = (char)is_done(keys[i], args + i);
+            done += done_keys[i];
+        }
 
         i = (i + 1) % size;
     }
+
+    free(done_keys);
 
     return 0;
 }

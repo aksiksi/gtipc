@@ -103,17 +103,18 @@ void *service_worker(void *data) {
             }
 
             else {
-                pthread_mutex_lock(&client->started_mutex);
+                pthread_mutex_lock(&client->threads_mutex);
                 client->num_threads_started++;
-                pthread_mutex_unlock(&client->started_mutex);
+                pthread_mutex_unlock(&client->threads_mutex);
 
                 // Handle received request
                 handle_request(req, client);
 
                 // Increment number of threads completed
-                pthread_mutex_lock(&client->completed_mutex);
+                pthread_mutex_lock(&client->threads_mutex);
                 client->num_threads_completed++;
-                pthread_mutex_unlock(&client->completed_mutex);
+                pthread_mutex_unlock(&client->threads_mutex);
+                pthread_cond_signal(&client->threads_cond); // Signal to resize_shm_object()
             }
         }
     }
@@ -148,23 +149,39 @@ void handle_request(gtipc_request *req, client *client) {
     printf("Client %d, request %d, %d: DONE\n", client->pid, req->request_id, req->service);
 }
 
-void init_worker_threads(client *client) {
-    client->stop_client_threads = 0;
-    client->num_threads_started = 0;
-    client->num_threads_completed = 0;
-    client->completed_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-    client->started_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
-
+void start_worker_threads(client *client) {
     int i;
 
-    // Spawn the worker threads; they will wait for requests on the client request message queue
+    client->stop_client_threads = 0;
     for (i = 0; i < THREADS_PER_CLIENT; i++)
         pthread_create(&client->workers[i], NULL, service_worker, (void *)client);
 }
 
+void join_worker_threads(client *client) {
+    int i;
+
+    // Stop workers
+    client->stop_client_threads = 1;
+
+    // Wait for them to complete
+    for (i = 0; i < THREADS_PER_CLIENT; i++)
+        pthread_join(client->workers[i], NULL);
+}
+
+void init_worker_threads(client *client) {
+    client->stop_client_threads = 0;
+    client->num_threads_started = 0;
+    client->num_threads_completed = 0;
+    client->threads_mutex = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
+    client->threads_cond = (pthread_cond_t)PTHREAD_COND_INITIALIZER;
+
+    // Spawn worker threads for current client
+    start_worker_threads(client);
+}
+
 void cleanup_worker_threads(client *client) {
-    pthread_mutex_destroy(&client->completed_mutex);
-    pthread_mutex_destroy(&client->started_mutex);
+    pthread_mutex_destroy(&client->threads_mutex);
+    pthread_cond_destroy(&client->threads_cond);
 
     int i;
 
@@ -320,22 +337,57 @@ void resize_shm_object(client *client) {
     // Map new shared memory segment
     char *new_shm_addr = mmap(NULL, new_shm_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
 
-    // Wait for all started threads to complete
-    while (client->num_threads_completed != client->num_threads_started);
+    // Initialize shared memory
+    int i;
+    gtipc_shared_entry se;
+    se.used = 0;
+    se.done = 0;
+
+    pthread_mutexattr_t attr;
+    pthread_mutexattr_init(&attr);
+    pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+
+    // Init the new segment of memory
+    for (i = ((int)client->shm_size / sizeof(gtipc_shared_entry)); i < (new_shm_size / sizeof(gtipc_shared_entry)); i++) {
+        // Copy over entire object to newly created shared mem
+        memcpy(new_shm_addr + i*sizeof(gtipc_shared_entry), &se, sizeof(gtipc_shared_entry));
+
+        // Get handle to shared entry mutex
+        gtipc_shared_entry *entry = (gtipc_shared_entry *)(new_shm_addr + i*sizeof(gtipc_shared_entry));
+        pthread_mutex_t *mutex = &entry->mutex;
+
+        // Init the mutex as shared
+        pthread_mutex_init(mutex, &attr);
+    }
+
+    pthread_mutexattr_destroy(&attr);
+
+    // Stop worker threads and wait for them to finish
+    join_worker_threads(client);
 
     // Copy over old shared segment to new segment
     memcpy(new_shm_addr, client->shm_addr, client->shm_size);
 
-    // Send notification to client that new segment is ready
+    // Synchronize shared memory with client
+    // Server now has most up-to-date copy of shared memory
+    msync(new_shm_addr, client->shm_size, MS_INVALIDATE | MS_SYNC);
+
+    close(fd);
+
+    // Send notification to client that new segment is ready to go
     gtipc_response resp;
     resp.request_id = -1;
     mq_send(client->send_queue, (char *)&resp, sizeof(gtipc_response), 1);
+
+    // Unmap old memory
+    munmap(client->shm_addr, client->shm_size);
 
     // Switch shared memory refs
     client->shm_addr = new_shm_addr;
     client->shm_size = new_shm_size;
 
-    close(fd);
+    // Restart worker threads
+    start_worker_threads(client);
 }
 
 /**
@@ -343,9 +395,13 @@ void resize_shm_object(client *client) {
  * and add it to the clients list.
  */
 int register_client(gtipc_registry *reg) {
+    // If client already registered, skip
+    client_list *node = find_client(reg->pid);
+    if (node != NULL)
+        return 0;
+    
     // Create new client object based on given registry
     client client;
-
     client.pid = reg->pid;
 
     // Open queues
@@ -362,7 +418,7 @@ int register_client(gtipc_registry *reg) {
     open_shm_object(reg, &client);
 
     // Append newly created client to global list
-    client_list *node = malloc(sizeof(client_list));
+    node = malloc(sizeof(client_list));
     node->client = client;
     append_client(node);
 
