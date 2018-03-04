@@ -56,7 +56,7 @@ void append_client(client_list *node);
 
 /* POSIX IPC setup and cleanup */
 void open_shm_object(gtipc_registry *reg, client *client);
-void resize_shm_object(client *client);
+void *resize_shm_object(void *c);
 
 /* Internal functions */
 void init_server();

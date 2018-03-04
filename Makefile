@@ -4,7 +4,7 @@ OBJDIR := obj
 BINDIR := bin
 
 CC := gcc
-CCFLAGS  := -Wall -c -DDEBUG=1
+CCFLAGS  := -Wall -c -DDEBUG=0
 INCLUDES := -I$(INCDIR)
 LIBS := -lrt -lpthread
 
@@ -13,7 +13,7 @@ CLIENT := $(BINDIR)/gtipc-client
 SERVER := $(BINDIR)/gtipc-server
 API := $(BINDIR)/libgtipc.a
 
-.PHONY: all api client server clean
+.PHONY: all api client server clean submission
 
 all: api client server
 
@@ -22,6 +22,9 @@ client: $(CLIENT)
 server: $(SERVER)
 
 api: $(API)
+
+submission:
+	zip -r project2-aksiksi.zip Makefile CMakeLists.txt README.md include/ sample/ src/
 
 # gtipc API library target
 $(API): $(OBJDIR)/gtipc_api.o | $(BINDIR)

@@ -99,7 +99,10 @@ void *service_worker(void *data) {
 
             if (req->request_id == -1) {
                 // Resize request received from client
-                resize_shm_object(client);
+                // Spawn *new* detached thread to deal with it :P
+                pthread_t resize_thread;
+                pthread_create(&resize_thread, NULL, resize_shm_object, (void *)client);
+                pthread_detach(resize_thread);
             }
 
             else {
@@ -146,7 +149,9 @@ void handle_request(gtipc_request *req, client *client) {
     entry->done = 1;
     pthread_mutex_unlock(mutex);
 
+    #if DEBUG
     printf("Client %d, request %d, %d: DONE\n", client->pid, req->request_id, req->service);
+    #endif
 }
 
 void start_worker_threads(client *client) {
@@ -164,8 +169,11 @@ void join_worker_threads(client *client) {
     client->stop_client_threads = 1;
 
     // Wait for them to complete
-    for (i = 0; i < THREADS_PER_CLIENT; i++)
-        pthread_join(client->workers[i], NULL);
+    for (i = 0; i < THREADS_PER_CLIENT; i++) {
+        // Only cancel *other* threads
+        if (client->workers[i] != pthread_self())
+            pthread_join(client->workers[i], NULL);
+    }
 }
 
 void init_worker_threads(client *client) {
@@ -212,17 +220,16 @@ static void *registry_handler(void *unused) {
         // Read out registry entry
         reg = (gtipc_registry *)recv_buf;
 
-        printf("CMD: %d, PID: %ld, Send queue: %s, Recv queue: %s\n", reg->cmd, (long)reg->pid,
-               reg->send_queue_name, reg->recv_queue_name);
-
         // Register or unregister the client based on given command
         switch (reg->cmd) {
             case GTIPC_CLIENT_REGISTER:
                 register_client(reg);
+                printf("Client %d just registered\n", reg->pid);
                 break;
             case GTIPC_CLIENT_UNREGISTER:
             case GTIPC_CLIENT_CLOSE:
                 unregister_client(reg->pid, 0);
+                printf("Client %d just unregistered\n", reg->pid);
                 break;
             default:
                 fprintf(stderr, "ERROR: Incorrect registry command received from client %d\n", reg->pid);
@@ -320,10 +327,12 @@ void open_shm_object(gtipc_registry *reg, client *client) {
 /**
  * Resize the shared mem object in coordination with client.
  */
-void resize_shm_object(client *client) {
+void *resize_shm_object(void *c) {
+    client *client = c;
+
     int fd;
 
-    // Open new shared memory object
+    // Open shared memory object
     if ((fd = shm_open(client->shm_name, O_RDWR, S_IRUSR | S_IWUSR)) == -1) {
         fprintf(stderr, "ERROR: Failed to resize shared mem object for client %d\n", client->pid);
         exit(EXIT_FAILURE);
@@ -388,6 +397,8 @@ void resize_shm_object(client *client) {
 
     // Restart worker threads
     start_worker_threads(client);
+
+    return NULL;
 }
 
 /**
@@ -424,12 +435,6 @@ int register_client(gtipc_registry *reg) {
 
     // Init worker thread state
     init_worker_threads(&node->client);
-
-    // Spin up
-
-    #if DEBUG
-        printf("Client %d has queues %d and %d\n", clients->client.pid, clients->client.send_queue, clients->client.recv_queue);
-    #endif
 
     return 0;
 }
@@ -536,10 +541,14 @@ int main(int argc, char **argv) {
 
     char in[2];
 
+    printf("Server initialized successfully. Enter 'q' to quit.\n");
+
     // Wait for user exit
-    while (in[0] != 'x') fgets(in, 2, stdin);
+    while (in[0] != 'q') fgets(in, 2, stdin);
 
     exit_server();
+
+    printf("Server exited successfully. Thank you.\n");
 
     return 0;
 }

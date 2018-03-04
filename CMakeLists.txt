@@ -13,7 +13,7 @@ add_library(gtipc
 # Link in libruntime and pthread
 target_link_libraries(gtipc rt pthread)
 
-target_compile_definitions(gtipc PUBLIC -DDEBUG=1)
+target_compile_definitions(gtipc PUBLIC -DDEBUG=0)
 
 # gtipc client
 add_executable(gtipc-client

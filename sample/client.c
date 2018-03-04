@@ -40,11 +40,10 @@ void *test_thread(void *unused) {
     #endif
 
     // Read the file created by the file service
-//    FILE *fp = fopen(file_arg->path, "r");
-//    char line[100];
-//    fscanf(fp, "%s\n", line);
-//    printf("Read from %s: %s\n", file_arg->path, line);
-//    fclose(fp);
+    FILE *fp = fopen(file_arg->path, "r");
+    char line[100];
+    fscanf(fp, "%s\n", line);
+    fclose(fp);
 
     return NULL;
 }
@@ -54,8 +53,8 @@ int main() {
 
     gtipc_init();
 
-    int num_async = 1024;
-    int num_sync = 16;
+    int num_async = 2048;
+    int num_sync = 128;
 
     // Perform half of the async requests
     gtipc_arg async_args[num_async];
@@ -77,7 +76,7 @@ int main() {
     diff.tv_nsec = ts2.tv_nsec - ts1.tv_nsec;
     diff_usec = diff.tv_sec * 1000000 + (long)(diff.tv_nsec / 1000.0);
 
-    printf("Time to perform %d async requests: %ld usecs\n", num_async / 2, diff_usec);
+    printf("Time to perform first %d async requests: %ld usecs\n", num_async / 2, diff_usec);
 
     // Now perform all of the sync requests to rand service
     gtipc_arg sync_args[num_sync];
@@ -95,7 +94,7 @@ int main() {
             // Let's spawn three background threads, for fun!
             pthread_t t;
 
-            for (j = 0; j < 3; j++) {
+            for (j = 0; j < 10; j++) {
                 pthread_create(&t, NULL, test_thread, NULL);
                 pthread_detach(t);
             }
@@ -117,7 +116,7 @@ int main() {
     diff.tv_nsec = ts2.tv_nsec - ts1.tv_nsec;
     diff_usec = diff.tv_sec * 1000000 + (long)(diff.tv_nsec / 1000.0);
 
-    printf("Time to complete %d sync and %d async requests (in parallel): %ld usecs\n",
+    printf("Time to complete all %d sync and %d async requests (in parallel): %ld usecs\n",
            num_sync, num_async, diff_usec);
 
     gtipc_exit();
