@@ -46,10 +46,10 @@ To build, simply run `make` in the root directory.
 2. 1024 asynchronous requests to the MUL service (triggers shared memory resize)
 3. 128 synchronous (blocking) requests to the RAND service
 4. Spawns 10 background threads that each perform (in parallel):
-    a. An asynchronous request to RAND
-    b. An asynchronous request to the FILE service
-    c. A synchronous request to RAND
-    d. Join both of the asynchronous requests
+    1. An asynchronous request to RAND
+    2. An asynchronous request to the FILE service
+    3. A synchronous request to RAND
+    4. Join both of the asynchronous requests
 5. 1024 asynchronous requests to the MUL service (back on main thread)
 6. Join all 2048 asynchronous requests
 7. Exit the GTIPC library
