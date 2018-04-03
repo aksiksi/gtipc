@@ -4,7 +4,7 @@ OBJDIR := obj
 BINDIR := bin
 
 CC := gcc
-CCFLAGS  := -Wall -c -DDEBUG=0
+CCFLAGS  := -Wall -c -DDEBUG=0 -O3
 INCLUDES := -I$(INCDIR)
 LIBS := -lrt -lpthread
 
