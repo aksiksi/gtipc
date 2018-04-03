@@ -388,8 +388,12 @@ int resize_shm_object() {
     #endif
 
     // Reached max size, so do not resize
-    if (new_shm_size > GTIPC_SHM_MAX_SIZE)
+    if (new_shm_size > GTIPC_SHM_MAX_SIZE) {
+        // Restart the request queue worker thread
+        rqp.stop_thread = 0;
+        pthread_create(&rqp.thread, NULL, rq_worker, NULL);
         return 0;
+    }
 
     // Acquire the resize lock
     pthread_mutex_lock(&client.shm_resize_lock);
@@ -411,9 +415,6 @@ int resize_shm_object() {
         fprintf(stderr, "FATAL: Failed to remap shared memory region (errno %d)\n", errno);
         return GTIPC_SHM_ERROR;
     }
-
-    // Synchronize shared memory with backing file so server can read it as-is
-//    msync(new_shm_addr + client.shm_size, client.shm_size, MS_SYNC);
 
     // Notify the server about the resize operation
     gtipc_request req;
