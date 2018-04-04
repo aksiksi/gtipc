@@ -579,20 +579,20 @@ int is_done(gtipc_request_key key, gtipc_arg *arg) {
  * @return
  */
 int recv_response(gtipc_request_key key, gtipc_arg *arg) {
-    // 0.1 ms backoff
-    unsigned int backoff = 100;
+    // 1 us initial backoff
+    unsigned int backoff = 1;
 
     // Spin while not done
     while (1) {
-        // Sleep for short period before acquiring the lock
-        usleep(backoff);
-
         // Check if request served
         if (is_done(key, arg))
             break;
 
         // Exponential backoff
         backoff *= 2;
+
+        // Sleep for short period before checking again
+        usleep(backoff);
     }
 
     return 0;
